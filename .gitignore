@@ -1,0 +1,10 @@
+config.json
+session.json
+tpl_*.png
+*.log
+*.log.old
+*.csv
+__pycache__/
+build/
+dist/
+*.spec
