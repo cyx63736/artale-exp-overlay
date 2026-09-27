@@ -582,18 +582,15 @@ class App:
         self.fill_from = time.time()
         self.qs_all, self.qs_add = P(0), P(0)
         self.total = P(None)
-        self.total_act = P(0.0)
         self.inv_pend, self.inv_slots = P(None), P(None)
+        self.total_act = P(0.0)
         self.last_rise = P(None)
         self.cap_since = P(None)
         self.inv_msg = ''
         self.meso, self.meso_pend = None, None
-        self.spent_all = 0
-        self.meso_spent = 0
+        self.meso_drop = None
         self.meso_t = 0.0
         self.qs_sus = P(0)
-        self.cur_bag_id = 0
-        self.meso_bag = None
         self.exp_ok_t = 0.0
         self.new_session()
         self.build()
@@ -608,8 +605,7 @@ class App:
 
     SESSION_KEYS = ('gain', 'hist', 'levelups', 'deaths', 'qs_used', 'bag_used', 'meso_anchor', 'series',
                     'qs_sus_cnt', 'last_drop', 'inc_done', 'seg_pending')
-    KEEP_KEYS = ('need', 'qs_all', 'qs_add', 'total', 'inv_slots', 'last_rise',
-                 'spent_all', 'meso', 'meso_spent', 'meso_t', 'qs_sus')
+    KEEP_KEYS = ('need', 'qs_all', 'qs_add', 'total', 'total_act', 'inv_slots', 'last_rise', 'meso', 'meso_t', 'qs_sus')
 
     def save_state(self):
         try:
@@ -645,6 +641,7 @@ class App:
                     if isinstance(v, dict):
                         v = {kk: tup(vv) for kk, vv in v.items()}
                     setattr(self, k, tup(v) if k in ('exp_last',) else v)
+            self.last_rise = {kk: tuple(vv[:5]) if vv and len(vv) >= 5 else None for kk, vv in self.last_rise.items()}
             if not data.get('running'):
                 return
             for k in self.SESSION_KEYS:
@@ -653,13 +650,19 @@ class App:
                     if isinstance(v, dict):
                         v = {kk: tup(vv) for kk, vv in v.items()}
                     setattr(self, k, v)
-            ma = tup(self.meso_anchor)
+            ma, d = tup(self.meso_anchor), self.inc_done
+            old = bool(ma is not None and len(ma) != 3 or d is not None and len(d) != 2)
             if ma is not None:
-                if len(ma) < 4:
-                    ma = tuple(ma) + (0.0, None)[len(ma) - 2:]
-                else:
-                    ma = (ma[0], ma[1], ma[2], ma[3] if isinstance(ma[3], float) and ma[3] > 1e9 else None)
-            self.meso_anchor = ma
+                if len(ma) == 2:
+                    ma = (ma[0], 0.0, None)
+                elif len(ma) == 4:
+                    ma = (ma[0], ma[2], ma[3])
+                ma = (ma[0], ma[1], ma[2] if isinstance(ma[2], float) and ma[2] > 1e9 else None)
+            if d is not None and len(d) == 3:
+                d = [d[0], d[2]]
+            self.meso_anchor, self.inc_done = ma, d
+            if old:
+                self.series = []
             self.hist = [tuple(x) for x in self.hist]
             self.series = [tuple(x) for x in self.series]
             self.acc = float(data.get('acc') or 0)
@@ -679,7 +682,6 @@ class App:
             else:
                 if not self.seg_pending:
                     self.close_seg(self.acc)
-                self.seg_end = None
                 log_detail(f'接續上一段（已練 {hms(self.acc)}，暫停中）')
                 self.say(f'已接回上一段（{hms(self.acc)}），暫停中，按 ▶ 繼續', 10)
         except Exception:
@@ -711,7 +713,7 @@ class App:
         self.meso_anchor = None
         self.inc_done = None
         self.seg_pending = False
-        self.seg_end = None
+        self.meso_drop = None
         self.pend_dec = None
         self.reject_n = 0
         self.pre_inc = None
@@ -766,22 +768,20 @@ class App:
         keys = (k,) if k else ('hp', 'mp')
         return bool(self.cfg.get('inv_region')) and any(os.path.exists(tpl_path(x)) for x in keys)
 
-    def start_meso(self, fresh=60):
+    def start_meso(self):
         p = self.meso_pend
-        if fresh < 60 and p and p[0] != self.meso:
+        if p and p[0] != self.meso:
             return
-        if self.meso_anchor is None and self.meso is not None and time.time() - self.meso_t < fresh:
-            spent = self.spent_all if self.meso_bag == self.cur_bag_id else self.meso_spent
-            self.meso_anchor = (self.meso, spent, self.active(), self.meso_t)
+        if self.meso_anchor is None and self.meso is not None and time.time() - self.meso_t < 5:
+            self.meso_anchor = (self.meso, self.active(), self.meso_t)
 
     def close_seg(self, act_end):
         ma = self.meso_anchor
         if ma is None or self.meso is None:
             return
-        d = self.inc_done or [0, 0, 0.0]
-        self.inc_done = [d[0] + self.meso - ma[0], d[1] + self.meso_spent - ma[1], d[2] + max(0.0, act_end - ma[2])]
+        d = self.inc_done or [0, 0.0]
+        self.inc_done = [d[0] + self.meso - ma[0], d[1] + max(0.0, act_end - ma[1])]
         self.meso_anchor = None
-        self.seg_end = (self.meso, self.meso_t, ma[3])
 
     def feed_meso(self, v, bag_id=0):
         p = self.meso_pend
@@ -789,42 +789,55 @@ class App:
             p[1] += 1
             p[2].add(bag_id)
         else:
-            p = self.meso_pend = [v, 1, {bag_id}]
+            same = bool(p and abs(v - p[0]) <= abs(p[0]) * 0.05 and len(str(v)) == len(str(p[0])))
+            p = self.meso_pend = [v, 1, set(p[2]) if same else set()]
+            p[2].add(bag_id)
         last = self.meso
         big = bool(last) and (abs(v - last) > last * 0.5 or abs(len(str(v)) - len(str(last))) >= 2)
         need = 3 if self.counting() and self.meso_anchor is None else 2
         if p[1] < need or (big and len(p[2]) < 2):
             return 'wait'
-        if v != last or self.meso_spent != self.spent_all:
-            log_detail(f'楓幣 {v:,}' + (f'（上次 {last:,}，{v - last:+,}）' if last is not None else '（第一次讀到）') +
-                       (f'，買藥累計 {self.spent_all:,}' if self.spent_all else ''))
+        if v != last:
+            log_detail(f'楓幣 {v:,}' + (f'（上次 {last:,}，{v - last:+,}）' if last is not None else '（第一次讀到）'))
+        spent = last is not None and v < last and ((self.paused and self.seg_pending) or
+                                                    (self.counting() and self.meso_anchor is not None))
+        if spent:
+            self.seg_pending = False
+            self.close_seg(self.acc if self.paused else self.active())
+            self.meso_drop = (last, v, time.time())
+        elif self.meso_drop:
+            old, low, t = self.meso_drop
+            if (v >= old and time.time() - t < 30 and self.inc_done
+                    and self.meso_anchor and self.meso_anchor[0] == low):
+                self.inc_done[0] -= old - low
+                log_detail(f'楓幣 {v:,}：剛才的 {low:,} 是讀錯，不算花掉')
+            if v != low:
+                self.meso_drop = None
         self.meso = v
-        self.meso_spent = self.spent_all
         self.meso_t = time.time()
-        self.meso_bag = bag_id
-        if self.paused and self.seg_pending:
+        if spent and self.paused:
+            log_detail(f'楓幣 {v:,} 比暫停前的 {last:,} 少：是暫停期間花掉的，不算收益，用 {last:,} 當暫停前的結尾')
+        elif spent:
+            log_detail(f'楓幣 {v:,} 比上次的 {last:,} 少：是花掉的，不算收益，從 {v:,} 重新起算')
+        elif self.paused and self.seg_pending:
             self.seg_pending = False
             self.close_seg(self.acc)
             log_detail(f'楓幣 {v:,} 當作暫停前的結尾，暫停期間的楓幣增減不算')
-        elif self.counting() and self.meso_anchor is None:
-            self.meso_anchor = (v, self.spent_all, self.active(), self.meso_t)
+        if self.counting() and self.meso_anchor is None:
+            self.meso_anchor = (v, self.active(), self.meso_t)
             log_detail(f'楓幣 {v:,} 當作這次的起點')
         return 'ok'
 
-    def income_parts(self):
+    def income(self):
         d, ma = self.inc_done, self.meso_anchor
         if ma is None or self.meso is None:
-            return None if d is None else (d[0], d[1])
-        dm, back = self.meso - ma[0], self.meso_spent - ma[1]
-        return (dm, back) if d is None else (d[0] + dm, d[1] + back)
-
-    def income(self):
-        p = self.income_parts()
-        return None if p is None else p[0] + p[1]
+            return None if d is None else d[0]
+        dm = self.meso - ma[0]
+        return dm if d is None else d[0] + dm
 
     def income_secs(self, a):
         d, ma = self.inc_done, self.meso_anchor
-        return (d[2] if d else 0) + (a - ma[2] if ma else 0)
+        return (d[1] if d else 0) + (a - ma[1] if ma else 0)
 
     def feed_exp(self, exp, pct, trusted):
         counting, now = self.counting(), self.active()
@@ -965,7 +978,7 @@ class App:
                 self.qs_use(k, n, sus=True)
                 log_detail(f'{self.cfg[k + "_name"]} 快捷欄 {last} → {val}（這格用完換下一格，算用掉 {n}）')
             else:
-                log_detail(f'{self.cfg[k + "_name"]} 快捷欄 {last} → {val}（變多，不算買藥，等開背包確認）')
+                log_detail(f'{self.cfg[k + "_name"]} 快捷欄 {last} → {val}（變多，不算用量）')
         elif last - val <= step:
             self.qs_use(k, last - val)
         elif p[1] < 8:
@@ -979,8 +992,6 @@ class App:
         name, prev = self.cfg[k + '_name'], self.total[k]
         blind_for = now - self.qs_t[k]
         if self.qs[k] is not None and blind_for <= self.blind_sec():
-            if miss > 5:
-                self.last_drop[k] = (miss, now, 0, 0, slots)
             return
         if prev[3] < self.fill_from or miss > max(15, min(now - prev[3], blind_for) / 60 * 90):
             self.last_drop[k] = (miss, now, 0, 0, slots)
@@ -988,10 +999,7 @@ class App:
             return
         self.qs_credit[k] += miss
         self.qs_pend[k] = None
-        if self.counting():
-            n = miss
-        else:
-            n = max(0, min(miss, round(miss * (self.active() - self.total_act[k]) / max(1.0, now - prev[3]))))
+        n = miss if self.active() > self.total_act[k] else 0
         self.bag_used[k] += n
         self.last_drop[k] = (miss, now, n, miss, slots)
         if n:
@@ -1000,16 +1008,17 @@ class App:
     def blind_sec(self):
         return max(8, 2 * float(self.cfg.get('ocr_sec') or 3) + 2)
 
-    @staticmethod
-    def drop_back(ld, slots):
-        if len(ld) < 5:
-            return True
-        s = ld[4]
-        return bool(s and s[0] and slots and s[1] < s[0] and slots[1] > s[1]) or (not ld[3] and ld[0] <= 15)
+    def drop_back(self, ld, slots, amt, bag, now):
+        s = ld[4] if len(ld) > 4 else None
+        cells_back = bool(s and s[0] and slots and s[1] < s[0] and slots[1] > s[1])
+        if abs(amt - ld[0]) <= 5:
+            credit = ld[3] if len(ld) > 3 else 0
+            return bag or len(ld) < 5 or cells_back or (not credit and ld[0] <= 15)
+        return amt < ld[0] and cells_back and ld[0] - amt <= max(15, (now - ld[1]) / 60 * 90)
 
-    def set_total(self, k, T, slots=None, seen=None):
+    def set_total(self, k, T, slots=None):
         est, now = self.est_total(k), time.time()
-        price, name = self.cfg[k + '_price'], self.cfg[k + '_name']
+        name = self.cfg[k + '_name']
         if est is None:
             log_detail(f'{name} 背包總數 {T:,}（第一次讀到，當作起點）')
         else:
@@ -1018,40 +1027,32 @@ class App:
             if amt > 5 and self.qs_sus[k] >= amt - 5:
                 back = min(amt, self.qs_sus_cnt[k])
                 self.qs_used[k] -= back
-                log_detail(f'{name} 背包總數 {T:,}，預估 {est:,}（多 {amt:,}）→ 快捷欄之前讀錯多扣了，不是買藥'
+                log_detail(f'{name} 背包總數 {T:,}，預估 {est:,}（多 {amt:,}）→ 快捷欄之前讀錯多扣了'
                            + (f'，退回用量 {back:,}' if back else ''))
-            elif amt > 5 and ld and now - ld[1] < 1800 and abs(amt - ld[0]) <= 5 and self.drop_back(ld, slots):
-                self.bag_used[k] -= ld[2]
+            elif amt > 5 and ld and now - ld[1] < 1800 and self.drop_back(ld, slots, amt, self.mode(k) == 'bag', now):
+                back = min(amt, ld[2])
+                self.bag_used[k] -= back
                 if len(ld) > 3:
-                    self.qs_credit[k] = max(0, self.qs_credit[k] - ld[3])
+                    self.qs_credit[k] = max(0, self.qs_credit[k] - min(amt, ld[3]))
+                if self.mode(k) == 'bag' and len(ld) > 4 and ld[0] - amt > ld[2] - back:
+                    extra = ld[0] - amt - (ld[2] - back)
+                    self.bag_used[k] += extra
+                    back -= extra
                 self.last_drop[k] = None
-                log_detail(f'{name} 背包總數 {T:,}，上次少掉的 {ld[0]:,} 又出現了（當時被擋住）→ 退回用量')
+                log_detail(f'{name} 背包總數 {T:,}，上次少掉的 {ld[0]:,} 又出現了 {amt:,}（當時被擋住）'
+                           + (f'→ 退回用量 {back:,}' if back > 0 else f'→ 補算用量 {-back:,}' if back < 0 else '→ 不算補貨'))
             elif amt > 5:
-                cost = amt * price
-                self.spent_all += cost
-                ma, se = self.meso_anchor, self.seg_end
-                adj_a = bool(seen and ma and ma[3] is not None and seen <= ma[3])
-                if adj_a:
-                    self.meso_anchor = (ma[0], ma[1] + cost, ma[2], ma[3])
-                adj_d = bool(seen and self.inc_done and se and (se[2] is None or seen > se[2]) and seen <= se[1])
-                if adj_d:
-                    self.inc_done[1] += cost
-                self.last_rise[k] = (amt, est, now, self.qs_all[k], self.qs_add[k], adj_a, adj_d)
-                log_detail(f'{name} 背包總數 {T:,}，預估 {est:,} → 算買了 {amt:,} 瓶（{amt * price:,} 楓幣，收益會加回）')
-                self.say(f'偵測到買了 {amt:,} 瓶{name}（{short(amt * price)}），收益會把這筆加回來', 8)
+                self.last_rise[k] = (amt, est, now, self.qs_all[k], self.qs_add[k])
+                log_detail(f'{name} 背包總數 {T:,}，預估 {est:,}（多 {amt:,}）→ 不算用量，當作新的總數')
             else:
                 if lr and now - lr[2] < 1800:
-                    amt, est0, _, q0, a0 = lr[:5]
+                    amt0, est0, _, q0, a0 = lr
                     est0_now = est0 - (self.qs_all[k] - q0) + (self.qs_add[k] - a0)
-                    if abs(T - est0_now) <= 5 + (0 if self.mode(k) == 'qs' else 30):
-                        self.spent_all -= amt * price
-                        ma = self.meso_anchor
-                        if len(lr) > 5 and lr[5] and ma:
-                            self.meso_anchor = (ma[0], ma[1] - amt * price, ma[2], ma[3])
-                        if len(lr) > 6 and lr[6] and self.inc_done:
-                            self.inc_done[1] -= amt * price
+                    qs_live = self.mode(k) == 'qs' and self.qs[k] is not None and now - self.qs_t[k] <= self.blind_sec()
+                    if abs(T - est0_now) <= 5 + (0 if self.mode(k) == 'qs' else 30) and (
+                            qs_live or est - T > max(15, (now - lr[2]) / 60 * 90)):
                         self.last_rise[k] = None
-                        log_detail(f'{name} 背包總數 {T:,}，回到補貨前的數字 → 上次的「買了 {amt:,} 瓶」是讀錯，退回')
+                        log_detail(f'{name} 背包總數 {T:,}，回到變多之前的數字 → 上次多出來的 {amt0:,} 是讀錯，不算用量')
                         est = est0_now
                     elif abs(T - est) <= 5:
                         self.last_rise[k] = None
@@ -1060,8 +1061,14 @@ class App:
             miss = est - T
             if self.mode(k) == 'bag':
                 if self.running and miss > 0:
-                    self.bag_used[k] += miss
-                    self.last_drop[k] = (miss, now, miss)
+                    prev_t = self.total[k][3]
+                    n = miss if miss <= max(15, (now - prev_t) / 60 * 90) else 0
+                    if self.active() <= self.total_act[k]:
+                        n = 0
+                    self.bag_used[k] += n
+                    self.last_drop[k] = (miss, now, n, 0, slots)
+                    if not n:
+                        log_detail(f'{name} 背包少了 {miss:,}，不像是喝掉的，不算用量')
             elif miss > 0:
                 self.qs_miss(k, miss, now, slots)
         self.total[k] = (T, self.qs_all[k], self.qs_add[k], now)
@@ -1077,7 +1084,7 @@ class App:
         if p and p[0] == T and p[1] == n:
             p[2] += 1
         else:
-            p = self.inv_pend[k] = [T, n, 1, time.time()]
+            p = self.inv_pend[k] = [T, n, 1]
         est = self.est_total(k)
         if est is None:
             need = 3
@@ -1093,7 +1100,7 @@ class App:
             return 'wait'
         slots = (self.inv_slots[k], n)
         self.inv_slots[k] = n
-        self.set_total(k, T, slots, seen=p[3] if len(p) > 3 else None)
+        self.set_total(k, T, slots)
         return 'ok'
 
     def stats(self):
@@ -1404,7 +1411,7 @@ class App:
             if no_end:
                 self.seg_pending = False
             else:
-                self.start_meso(fresh=5)
+                self.start_meso()
             log_detail('繼續計時')
             if no_end and self.cfg.get('meso_region') and self.meso_anchor is not None:
                 self.say('繼續計時（暫停期間沒記錄到楓幣，這段的楓幣增減會計算）', 8)
@@ -1561,7 +1568,6 @@ class App:
         self.ocr_seen = time.time()
         parts = []
         game_visible = True
-        self.cur_bag_id = out.get('bag_id', self.cur_bag_id)
         if 'exp' in out:
             self.raw['exp'] = out['exp']
             p = parse_exp(out['exp'] or '')
@@ -1729,11 +1735,7 @@ class App:
         extra = f'  升{self.levelups}級' if self.levelups else ''
         v['gain'].configure(text=f'{self.gain:,}{extra}')
         if s['profit'] is not None:
-            dm, back = self.income_parts()
-            parts = f"楓幣{'+' if dm >= 0 else '−'}{short(abs(dm))}"
-            if back:
-                parts += f"、買藥加回{short(back)}"
-            v['earn'].configure(text=f"{short(s['profit'])}（{parts}、藥水−{short(s['cost'])}）",
+            v['earn'].configure(text=f"{short(s['profit'])}（撿到{short(s['income'])}、藥水−{short(s['cost'])}）",
                                 fg=C['good'] if s['profit'] >= 0 else C['hp'])
         elif self.cfg.get('meso_region'):
             v['earn'].configure(text=f"藥水花了 {short(s['cost'])}（開背包讀楓幣後算收益）", fg=C['muted'])
