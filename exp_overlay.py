@@ -65,6 +65,7 @@ RESUME_HOURS = 2
 
 
 DETAIL_PATH = os.path.join(HERE, '明細紀錄.log')
+DIGITS_PATH = os.path.join(HERE, 'digits.dat')
 
 
 def log_detail(text):
@@ -226,6 +227,269 @@ def flatten(res):
     return ' '.join(out)
 
 
+def digit_fill(bgr):
+    import numpy as np
+    a = bgr.astype(np.int16)
+    mx, mn = a.max(axis=2), a.min(axis=2)
+    return ((mn >= 185) & (mx - mn <= 10)).astype(np.uint8)
+
+
+def digit_box(bgr, left=0, gap=0.45):
+    import cv2
+    import numpy as np
+    m = digit_fill(bgr)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    gray = bgr.astype(np.int16).max(axis=2)
+    H, W = m.shape
+    comps = []
+    for i in range(1, n):
+        x, y, w, h, area = st[i]
+        if h < 3 or area < 4 or x == 0 or y == 0 or x + w >= W or y + h >= H or x + w * 0.5 < left:
+            continue
+        pad = max(2, h // 8)
+        x0, y0, x1, y1 = max(0, x - pad), max(0, y - pad), min(W, x + w + pad), min(H, y + h + pad)
+        big = np.zeros((y1 - y0, x1 - x0), np.uint8)
+        big[y - y0:y - y0 + h, x - x0:x - x0 + w] = lab[y:y + h, x:x + w] == i
+        ring = cv2.dilate(big, np.ones((2 * pad + 1, 2 * pad + 1), np.uint8)).astype(bool) & ~big.astype(bool)
+        v = np.sort(gray[y0:y1, x0:x1][ring])
+        if len(v) and v[:max(1, len(v) // 2)].mean() <= 90:
+            comps.append((int(x), int(y), int(w), int(h)))
+    whole = [c for c in comps if c[2] <= c[3] * 1.2]
+    if not whole:
+        return None
+    hd = max(c[3] for c in whole)
+    if hd < 8:
+        return None
+    anchor = max((c for c in whole if c[3] >= 0.7 * hd), key=lambda c: c[1] + c[3])
+    top, bot = anchor[1] - 0.2 * hd, anchor[1] + anchor[3] + 0.2 * hd
+    row = [c for c in comps if c[1] >= top and c[1] + c[3] <= bot]
+    x0, x1 = anchor[0], anchor[0] + anchor[2]
+    grown = True
+    while grown:
+        grown = False
+        for c in row:
+            if c[0] <= x1 + gap * hd and c[0] + c[2] >= x0 - gap * hd and (c[0] < x0 or c[0] + c[2] > x1):
+                x0, x1, grown = min(x0, c[0]), max(x1, c[0] + c[2]), True
+    part = [c for c in row if c[0] >= x0 and c[0] + c[2] <= x1]
+    y0, y1 = min(c[1] for c in part), max(c[1] + c[3] for c in part)
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def split_digits(bgr, box, text, fill=None):
+    import numpy as np
+    n = len(text)
+    x, y, w, h = box
+    prof = (digit_fill(bgr) if fill is None else fill)[y:y + h, x:x + w].sum(axis=0).astype(np.float64)
+    lo, hi = max(2, int(h * 0.2)), int(h * 1.1)
+    INF = float('inf')
+    best = [[INF] * (w + 1) for _ in range(n + 1)]
+    back = [[-1] * (w + 1) for _ in range(n + 1)]
+    best[0][0] = 0.0
+    for k in range(1, n + 1):
+        for c in range(1, w + 1):
+            for L in range(lo, min(hi, c) + 1):
+                prev = best[k - 1][c - L]
+                if prev == INF:
+                    continue
+                dev = (L - h * (0.35 if text[k - 1] == '1' else 0.62)) / (0.25 * h)
+                cost = prev + (prof[c - 1] if c < w else 0) + 3 * dev * dev
+                if cost < best[k][c]:
+                    best[k][c], back[k][c] = cost, c - L
+    if best[n][w] == INF:
+        return None
+    cuts, c = [], w
+    for k in range(n, 0, -1):
+        cuts.append((x + back[k][c], x + c))
+        c = back[k][c]
+    return cuts[::-1]
+
+
+class DigitFont:
+    MAX_PER = 4
+    MIN_H = 16
+
+    def __init__(self, glyphs=None, punct=False):
+        self.glyphs = list(glyphs or [])
+        self.punct = punct
+        self.bad = 0
+        self.reads = 0
+        self.resized = False
+
+    def known(self):
+        return ''.join(sorted({g[0] for g in self.glyphs}))
+
+    def learn(self, bgr, text, left=0):
+        import cv2
+        import numpy as np
+        box = digit_box(bgr, left, 0.9 if self.punct else 0.45)
+        n = len(text)
+        if not box or not text.isdigit() or not (0.25 * n <= box[2] / box[3] <= 0.95 * n):
+            return ''
+        if box[3] < self.MIN_H:
+            return ''
+        x, y, w, h = box
+        H, W = bgr.shape[:2]
+        g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        X0, Y0, X1, Y1 = max(0, x - 3), max(0, y - 3), min(W, x + w + 3), min(H, y + h + 3)
+        cn, lab, st, _ = cv2.connectedComponentsWithStats(digit_fill(bgr[Y0:Y1, X0:X1]), connectivity=4)
+        keep = np.zeros(cn, bool)
+        for i in range(1, cn):
+            cx, cy, cw, chh = st[i][:4]
+            keep[i] = cx > 0 and cy > 0 and cx + cw < X1 - X0 and cy + chh < Y1 - Y0 and not (self.punct and chh < 0.6 * h)
+        fill = np.zeros((H, W), np.uint8)
+        fill[Y0:Y1, X0:X1] = keep[lab]
+        segs = split_digits(bgr, box, text, fill)
+        if not segs:
+            return ''
+        pad, d = max(2, round(h * 0.1)), max(1, round(h * 0.05))
+        new = []
+        for (x0, x1), ch in zip(segs, text):
+            own = np.zeros((H, W), np.uint8)
+            own[:, x0:x1] = fill[:, x0:x1]
+            a0, a1, b0, b1 = max(0, x0 - pad), min(W, x1 + pad), max(0, y - pad), min(H, y + h + pad)
+            m = cv2.dilate(own[b0:b1, a0:a1], np.ones((2 * d + 1, 2 * d + 1), np.uint8)).astype(np.float32)
+            if m.sum() < h:
+                return ''
+            new.append((ch, g[b0:b1, a0:a1].copy(), m, (x0 - a0, a1 - x1)))
+        th = new[0][1].shape[0]
+        same_size = lambda gg: abs(gg[1].shape[0] - th) <= 0.15 * th
+        added = set()
+        for gl in new:
+            ch, t, m, _ = gl
+            if sum(1 for gg in self.glyphs if gg[0] == ch and same_size(gg)) >= self.MAX_PER:
+                continue
+            same = [self.sim(t, m, gg) for gg in self.glyphs if gg[0] == ch]
+            other = [self.sim(t, m, gg) for gg in self.glyphs if gg[0] != ch]
+            if (same and max(same) < 0.6) or (other and max(other) > max(same or [0.85])):
+                continue
+            self.glyphs.append(gl)
+            added.add(ch)
+        old = len(self.glyphs)
+        if len({gg[0] for gg in self.glyphs if same_size(gg)}) >= 6:
+            self.glyphs = [gg for gg in self.glyphs if same_size(gg)]
+        self.resized = len(self.glyphs) < old
+        return ''.join(sorted(added))
+
+    @staticmethod
+    def sim(t, m, other):
+        import cv2
+        import numpy as np
+        t2 = other[1]
+        size = (t2.shape[1], t2.shape[0])
+        tt = cv2.resize(t, size, interpolation=cv2.INTER_AREA)
+        mm = (cv2.resize(m, size, interpolation=cv2.INTER_AREA) > 0.5).astype(np.float32)
+        r = cv2.matchTemplate(t2, tt, cv2.TM_CCOEFF_NORMED, mask=mm)
+        return float(np.nan_to_num(r, nan=-1, posinf=-1, neginf=-1).max())
+
+    def read(self, bgr, left=0, thr=0.8):
+        import cv2
+        import numpy as np
+        g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        cands = []
+        for ch, t, m, (pl, pr) in self.glyphs:
+            if g.shape[0] < t.shape[0] or g.shape[1] < t.shape[1]:
+                continue
+            r = np.nan_to_num(cv2.matchTemplate(g, t, cv2.TM_CCOEFF_NORMED, mask=m), nan=-1, posinf=-1, neginf=-1)
+            th, tw = t.shape
+            for _ in range(12):
+                _, mx, _, (px, py) = cv2.minMaxLoc(r)
+                if mx < thr:
+                    break
+                if px + tw * 0.5 >= left:
+                    cands.append((float(mx), px, py, tw, th, ch, pl, pr, m))
+                r[max(0, py - th // 2):py + th // 2 + 1, max(0, px - tw // 2):px + tw // 2 + 1] = -1
+        if not cands:
+            return None
+        cands.sort(key=lambda c: -c[0])
+        kept = []
+        for c in cands:
+            c0, c1 = c[1] + c[6], c[1] + c[3] - c[7]
+            if all(min(c1, k[1] + k[3] - k[7]) - max(c0, k[1] + k[6])
+                   <= 0.35 * min(c1 - c0, k[3] - k[6] - k[7]) for k in kept):
+                kept.append(c)
+        top = kept[0]
+        row = sorted((k for k in kept if abs(k[2] - top[2]) <= 0.25 * top[4]), key=lambda k: k[1])
+        runs, cur = [], [row[0]]
+        for a, b in zip(row, row[1:]):
+            if b[1] - (a[1] + a[3]) <= (0.9 if self.punct else 0.2) * a[4]:
+                cur.append(b)
+            else:
+                runs.append(cur)
+                cur = [b]
+        runs.append(cur)
+        run = max(runs, key=lambda r: (top in r, len(r)))
+        if not self.complete(bgr, run, left, self.punct):
+            return None
+        return ''.join(k[5] for k in run)
+
+    @staticmethod
+    def complete(bgr, run, left=0, punct=False):
+        import cv2
+        import numpy as np
+        y0 = min(k[2] for k in run)
+        y1 = max(k[2] + k[4] for k in run)
+        th = y1 - y0
+        x0, x1 = min(k[1] for k in run), max(k[1] + k[3] for k in run)
+        m = digit_fill(bgr)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(m, connectivity=4)
+        cover = np.zeros(m.shape, bool)
+        for k in run:
+            cover[k[2]:k[2] + k[4], k[1] + k[6]:k[1] + k[3] - k[7]] = True
+            cover[k[2]:k[2] + k[4], k[1]:k[1] + k[3]] |= k[8] > 0
+            body = cv2.erode(k[8], np.ones((3, 3), np.uint8)) > 0
+            if m[k[2]:k[2] + k[4], k[1]:k[1] + k[3]][body].sum() < 0.5 * max(1, body.sum()):
+                return False
+        H, W = m.shape
+        missed = 0
+        for i in range(1, n):
+            cx, cy, cw, ch, area = st[i]
+            if area < 3:
+                continue
+            edge = cx == 0 or cy == 0 or cx + cw >= W or cy + ch >= H
+            if edge and (ch > 1.5 * th or cw > 3 * th):
+                continue
+            if min(cy + ch, y1) - max(cy, y0) < 0.5 * min(ch, th):
+                continue
+            if cy < y0 - 0.3 * th or cy + ch > y1 + 0.3 * th:
+                continue
+            if punct and ch < 0.45 * th:
+                continue
+            if not punct and (cx + cw < x0 - 0.3 * th or cx > x1 + 0.3 * th) or cx + cw * 0.5 < left:
+                continue
+            big = ch >= 0.35 * th and area >= 0.02 * th * th
+            if edge and big:
+                return False
+            inside = cover[lab == i]
+            if big and inside.mean() < 0.8:
+                return False
+            missed += int((~inside).sum())
+        return missed < 0.08 * th * th
+
+
+def load_fonts():
+    import pickle
+    try:
+        with open(DIGITS_PATH, 'rb') as f:
+            data = pickle.load(f)
+        return {k: DigitFont(v, punct=k == 'meso') for k, v in data.items()}
+    except Exception:
+        return {}
+
+
+def save_fonts(fonts):
+    import pickle
+    try:
+        tmp = DIGITS_PATH + '.tmp'
+        with open(tmp, 'wb') as f:
+            pickle.dump({k: f_.glyphs for k, f_ in fonts.items() if f_.glyphs}, f)
+        os.replace(tmp, DIGITS_PATH)
+    except Exception:
+        log_error(traceback.format_exc())
+
+
+FONT_NAME = {'bag': '背包', 'qs': '快捷欄', 'meso': '楓幣'}
+
+
 class OcrWorker(threading.Thread):
     def __init__(self, app):
         super().__init__(daemon=True)
@@ -237,6 +501,8 @@ class OcrWorker(threading.Thread):
         self.grab_fails = 0
         self.bag_id = 0
         self.was_open = False
+        self.fonts = {}
+        self.font_stat = [0, 0, time.time()]
 
     def run(self):
         try:
@@ -249,6 +515,7 @@ class OcrWorker(threading.Thread):
             except Exception:
                 self.engine = RapidOCR()
             self.sct = new_mss()
+            self.fonts = load_fonts()
         except Exception as e:
             log_error(traceback.format_exc())
             self.app.q.put(('ocr_err', f'OCR 無法載入：{e}'))
@@ -314,7 +581,7 @@ class OcrWorker(threading.Thread):
                         self.remember('exp', text)
                     out[k] = text
                 else:
-                    out[k] = self.read_count(img, key=k)
+                    out[k] = self.read_count(img, key=k, font='qs')
                 self.ok(k)
             except Exception as e:
                 out[k] = ''
@@ -336,7 +603,7 @@ class OcrWorker(threading.Thread):
         meso = self.app.cfg.get('meso_region')
         if meso and inv_open:
             try:
-                out['meso'] = self.read_count(self.grab(meso), key='meso', digits=True)
+                out['meso'] = self.read_count(self.grab(meso), key='meso', digits=True, font='meso')
                 self.ok('meso')
             except Exception as e:
                 self.fail('meso', e)
@@ -428,7 +695,8 @@ class OcrWorker(threading.Thread):
                     stacks.append(None)
                     continue
                 text = self.read_count(Image.fromarray(crop[:, :, ::-1].copy()), key=f'inv_{k}_{x}_{y}', strict=True,
-                                       fallback=Image.fromarray(strip[:, :, ::-1].copy()) if strip.size else None)
+                                       fallback=Image.fromarray(strip[:, :, ::-1].copy()) if strip.size else None,
+                                       font='bag', left=x - max(0, x - int(cw * 0.2)))
                 stacks.append(parse_count(text))
             res[k] = stacks
         return res
@@ -472,11 +740,70 @@ class OcrWorker(threading.Thread):
         if key in self.seen:
             self.seen[key] = (self.seen[key][0], text)
 
-    def read_count(self, img, key=None, strict=False, fallback=None, digits=False):
+    def read_count(self, img, key=None, strict=False, fallback=None, digits=False, font=None, left=0):
         if key:
             cached = self.unchanged(key, img)
             if cached is not None:
                 return cached
+        check = None
+        if font:
+            import numpy as np
+            bgr = np.array(img)[:, :, ::-1].copy()
+            if font == 'meso':
+                bgr = 255 - bgr
+            f = self.fonts.get(font)
+            t = f.read(bgr, left) if f and f.glyphs else None
+            if t and (not strict or bag_count(t)):
+                f.reads += 1
+                if f.reads % 20:
+                    self.font_stat[0] += 1
+                    self.font_log()
+                    if key:
+                        self.remember(key, t)
+                    return t
+                check = t
+            self.font_stat[1] += 1
+        text = self.ocr_count(img, strict, fallback, digits)
+        if font:
+            if font == 'meso':
+                v = parse_meso(text)
+                val = '' if v is None else str(v)
+            else:
+                val = bag_count(text) if strict else (str(parse_count(text)) if parse_count(text or '') is not None else '')
+            f = self.fonts.setdefault(font, DigitFont(punct=font == 'meso'))
+            if check is not None:
+                if val and val != check:
+                    f.bad += 1
+                    log_detail(f'{FONT_NAME[font]}數字：比對讀到 {check}、OCR 讀到 {val}，對不上，這次不採用')
+                    if f.bad >= 3:
+                        self.fonts[font] = DigitFont(punct=font == 'meso')
+                        save_fonts(self.fonts)
+                        log_detail(f'{FONT_NAME[font]}數字：比對一直跟 OCR 對不上，重新學')
+                    text = ''
+                elif not val:
+                    text = check
+            elif val and len(val) <= (12 if font == 'meso' else 6):
+                before = f.known()
+                new = f.learn(bgr, val, left)
+                if f.resized:
+                    log_detail(f'{FONT_NAME[font]}數字：字的大小變了（遊戲視窗調過大小？），照新的大小重新學')
+                if new or f.resized:
+                    save_fonts(self.fonts)
+                fresh = ''.join(c for c in new if c not in before)
+                if fresh:
+                    missing = ''.join(c for c in '0123456789' if c not in f.known())
+                    log_detail(f'{FONT_NAME[font]}數字：從 {val} 學到 {fresh}' + (f'（還沒學到 {missing}）' if missing else '（0~9 都學會了）'))
+        if key and (not (strict or digits) or re.search(r'\d', text)):
+            self.remember(key, text)
+        return text
+
+    def font_log(self):
+        st = self.font_stat
+        if time.time() - st[2] >= 600 and st[0] + st[1]:
+            log_detail(f'數字讀取：比對 {st[0]} 次、OCR {st[1]} 次（{st[0] * 100 // (st[0] + st[1])}% 用比對）')
+            self.font_stat = [0, 0, time.time()]
+
+    def ocr_count(self, img, strict, fallback, digits):
         arr = self.prep(img)
         try:
             res, _ = self.engine(arr)
@@ -513,8 +840,6 @@ class OcrWorker(threading.Thread):
             text = ''
         else:
             text = self.rec_only(img)
-        if key and (not (strict or digits) or re.search(r'\d', text)):
-            self.remember(key, text)
         return text
 
     def read(self, img, parser, wide):
@@ -604,7 +929,7 @@ class App:
         self.root.after(60000, self.autosave)
 
     SESSION_KEYS = ('gain', 'hist', 'levelups', 'deaths', 'qs_used', 'bag_used', 'meso_anchor', 'series',
-                    'qs_sus_cnt', 'last_drop', 'inc_done', 'seg_pending')
+                    'qs_sus_cnt', 'last_drop', 'inc_done', 'seg_pending', 'recon_acc', 'recon_add')
     KEEP_KEYS = ('need', 'qs_all', 'qs_add', 'total', 'total_act', 'inv_slots', 'last_rise', 'meso', 'meso_t', 'qs_sus')
 
     def save_state(self):
@@ -722,6 +1047,10 @@ class App:
         self.series = []
         self.qs_sus_cnt = {'hp': 0, 'mp': 0}
         self.last_drop = {'hp': None, 'mp': None}
+        self.recon_acc = {'hp': 0, 'mp': 0}
+        self.recon_add = {'hp': 0, 'mp': 0}
+        self.recon_t = {'hp': None, 'mp': None}
+        self.seg_t = time.time()
 
     def snapshot(self, a):
         return (a, self.gain, self.used('hp'), self.used('mp'), self.income())
@@ -992,18 +1321,49 @@ class App:
         name, prev = self.cfg[k + '_name'], self.total[k]
         blind_for = now - self.qs_t[k]
         if self.qs[k] is not None and blind_for <= self.blind_sec():
-            return
+            return -1 if miss <= max(15, (self.active() - self.total_act[k]) / 60 * 90) else None
         if prev[3] < self.fill_from or miss > max(15, min(now - prev[3], blind_for) / 60 * 90):
             self.last_drop[k] = (miss, now, 0, 0, slots)
             log_detail(f'{name} 快捷欄讀不到時背包少了 {miss:,}，不像是喝掉的，不算用量')
-            return
+            return None
         self.qs_credit[k] += miss
         self.qs_pend[k] = None
-        n = miss if self.active() > self.total_act[k] else 0
+        n = max(0, min(miss, round(miss * max(0.0, self.active() - self.total_act[k]) / max(1.0, now - prev[3]))))
         self.bag_used[k] += n
         self.last_drop[k] = (miss, now, n, miss, slots)
         if n:
             log_detail(f'{name} 快捷欄讀不到的這段時間用掉 {n:,} 瓶（用背包的數字補算）')
+        return n
+
+    def reconcile(self, k, miss, now, slots=None):
+        name = self.cfg[k + '_name']
+        acc = self.recon_acc[k]
+        if miss > 0:
+            if self.total[k] and self.total[k][3] >= self.seg_t:
+                acc += miss
+        elif miss < 0:
+            acc = max(acc + miss, -self.recon_add[k] - 5)
+        self.recon_acc[k] = acc
+        if acc > 5:
+            t = self.recon_t[k]
+            if slots and slots[1] < slots[0]:
+                return
+            if t is None:
+                self.recon_t[k] = now
+            elif now - t >= self.blind_sec() and self.qs_pend[k] is None:
+                self.bag_used[k] += acc
+                self.recon_add[k] += acc
+                self.recon_acc[k] = 0
+                self.recon_t[k] = None
+                log_detail(f'{name} 對帳：背包實際少掉的比算到的多 {acc:,} 瓶（快捷欄漏算），補算')
+            return
+        self.recon_t[k] = None
+        if acc < -5 and self.recon_add[k] > 0:
+            back = min(self.recon_add[k], -acc)
+            self.bag_used[k] -= back
+            self.recon_add[k] -= back
+            self.recon_acc[k] += back
+            log_detail(f'{name} 對帳：算到的用量比背包少掉的多 {-acc:,} 瓶，退回之前補算的 {back:,}')
 
     def blind_sec(self):
         return max(8, 2 * float(self.cfg.get('ocr_sec') or 3) + 2)
@@ -1063,14 +1423,20 @@ class App:
                 if self.running and miss > 0:
                     prev_t = self.total[k][3]
                     n = miss if miss <= max(15, (now - prev_t) / 60 * 90) else 0
-                    if self.active() <= self.total_act[k]:
-                        n = 0
+                    n = max(0, min(n, round(n * (self.active() - self.total_act[k]) / max(1.0, now - prev_t))))
                     self.bag_used[k] += n
                     self.last_drop[k] = (miss, now, n, 0, slots)
                     if not n:
                         log_detail(f'{name} 背包少了 {miss:,}，不像是喝掉的，不算用量')
-            elif miss > 0:
-                self.qs_miss(k, miss, now, slots)
+            else:
+                n = self.qs_miss(k, miss, now, slots) if miss > 0 else 0
+                if self.counting():
+                    if amt > 5:
+                        self.reconcile(k, 0, now, slots)
+                        if self.recon_acc[k] > 0:
+                            self.recon_acc[k] = max(0, self.recon_acc[k] - amt)
+                    else:
+                        self.reconcile(k, miss if n == -1 or miss <= 0 else 0, now, slots)
         self.total[k] = (T, self.qs_all[k], self.qs_add[k], now)
         self.total_act[k] = self.active()
         self.qs_sus[k] = self.qs_sus_cnt[k] = 0
@@ -1388,6 +1754,9 @@ class App:
             self.run_start = time.time()
             self.started_at = datetime.datetime.now()
             self.fill_from = max(self.fill_from, time.time() - 600)
+            self.recon_acc, self.recon_t = {'hp': 0, 'mp': 0}, {'hp': None, 'mp': None}
+            self.seg_t = time.time()
+            self.total_act = {kk: min(v, self.active()) for kk, v in self.total_act.items()}
             self.start_meso()
             for k in ('hp', 'mp'):
                 t = self.total[k]
@@ -1413,6 +1782,8 @@ class App:
             else:
                 self.start_meso()
             log_detail('繼續計時')
+            self.recon_acc, self.recon_t = {'hp': 0, 'mp': 0}, {'hp': None, 'mp': None}
+            self.seg_t = time.time()
             if no_end and self.cfg.get('meso_region') and self.meso_anchor is not None:
                 self.say('繼續計時（暫停期間沒記錄到楓幣，這段的楓幣增減會計算）', 8)
             elif self.cfg.get('meso_region') and self.meso_anchor is None and self.inc_done is not None:
@@ -1586,6 +1957,9 @@ class App:
             if k in out:
                 self.raw[k] = out[k]
                 v = parse_count(out[k] or '')
+                cap = self.cfg.get('stack_max')
+                if v is not None and cap and v > cap:
+                    v = None
                 if out.get(k + '_err'):
                     parts.append(self.cfg[k + '_name'] + ' 截圖失敗')
                 elif v is None:
@@ -2083,6 +2457,7 @@ class App:
     def forget_potion(self, k):
         self.total[k] = self.inv_pend[k] = self.inv_slots[k] = None
         self.last_rise[k] = self.last_drop[k] = None
+        self.recon_acc[k], self.recon_t[k] = 0, None
         self.qs_credit[k] = self.qs_sus[k] = 0
 
     def clear_region(self, k):
