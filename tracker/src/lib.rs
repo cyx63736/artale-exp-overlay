@@ -166,6 +166,7 @@ pub struct Tracker {
     pub cost_prev: [f64; 2],
     pub used_mark: [i64; 2],
     pub prev_price: [Option<f64>; 2],
+    pub session_no: u32,
 }
 
 pub fn sys_now() -> f64 {
@@ -250,6 +251,7 @@ impl Tracker {
             cost_prev: [0.0; 2],
             used_mark: [0; 2],
             prev_price: [None; 2],
+            session_no: 0,
         };
         t.new_session();
         t
@@ -328,6 +330,7 @@ impl Tracker {
         self.cost_prev = [0.0; 2];
         self.used_mark = [0; 2];
         self.prev_price = [None; 2];
+        self.session_no += 1;
     }
 
     pub fn snapshot(&self, a: f64) -> Snap {

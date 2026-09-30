@@ -189,7 +189,7 @@ impl Overlay {
     fn watch_ocr(&mut self, o: &tracker::OcrOut) {
         let now = self.now();
         let bag_open = o.inv.as_ref().map_or(false, |inv| inv.iter().any(|v| v.as_ref().map_or(false, |v| !v.is_empty())));
-        if (self.t.has("exp_region") && now - self.t.exp_ok_t > 5.0) || !self.names_ok() {
+        if (self.t.has("exp_region") && now - self.t.exp_ok_t > 5.0) || !self.names_ok() || self.settings.is_some() {
             return;
         }
         let odd = |k: usize| -> bool {
@@ -208,10 +208,14 @@ impl Overlay {
                 self.book.of(k).iter().filter(|p| p.name != name).map(|p| (p.name.clone(), p.qs.clone())).collect();
             let before = self.watch[k].prompt.clone();
             let seen = Seen { now, sig, val, cells, used: self.t.used(k), effect: both || potions::flooded(sig) };
-            if let Event::Confirmed = self.watch[k].feed(&seen, &others) {
-                self.watch[k].check = None;
-                self.t.logs.push(format!("{name}：快捷欄確認換好了"));
-                self.t.say(format!("快捷欄已經換成{name}"), 4.0);
+            match self.watch[k].feed(&seen, &others) {
+                Event::Confirmed => {
+                    self.watch[k].check = None;
+                    self.t.logs.push(format!("{name}：快捷欄確認換好了"));
+                    self.t.say(format!("快捷欄已經換成{name}"), 4.0);
+                }
+                Event::Renamed(from) => self.renamed(k, &from),
+                Event::None => {}
             }
             let w = &mut self.watch[k];
             if w.prompt != before {
@@ -248,6 +252,7 @@ impl Overlay {
             cost_prev: self.t.cost_prev[k],
             used_mark: self.t.used_mark[k],
             prev_price: self.t.prev_price[k],
+            session: self.t.session_no,
         };
         self.book.upsert(k, &old, self.t.price(k));
         if self.paths.tpl[k].exists() {
@@ -286,9 +291,15 @@ impl Overlay {
         let key = |s: &str| format!("{}_{s}", potions::KIND[k]);
         self.t.cfg.insert(key("name"), u.name.clone().into());
         self.t.cfg.insert(key("price"), u.price);
-        self.t.cost_prev[k] = u.cost_prev;
-        self.t.used_mark[k] = u.used_mark;
-        self.t.prev_price[k] = u.prev_price;
+        if u.session == self.t.session_no {
+            self.t.cost_prev[k] = u.cost_prev;
+            self.t.used_mark[k] = u.used_mark;
+            self.t.prev_price[k] = u.prev_price;
+        } else {
+            self.t.cost_prev[k] = 0.0;
+            self.t.used_mark[k] = 0;
+            self.t.prev_price[k] = None;
+        }
         self.t.forget_potion(k);
         self.t.forget_qs(k);
         self.book.restore_tpl(k, &u.name, &self.paths.tpl[k]);
@@ -299,6 +310,17 @@ impl Overlay {
         self.watch[k].prompt = None;
         self.t.logs.push(format!("改回{}（換成{cur}之後算的用量都算回{}）", u.name, u.name));
         self.t.say(format!("已改回{}", u.name), 4.0);
+    }
+
+    fn renamed(&mut self, k: usize, from: &str) {
+        let name = self.t.name(k);
+        self.book.move_look(k, from, &name);
+        self.book.restore_tpl(k, &name, &self.paths.tpl[k]);
+        self.refresh_tpl();
+        self.t.inv_msg.clear();
+        self.book.save();
+        self.t.say(format!("快捷欄一直都是{name}：{from}記的背包格子和快捷欄顏色已經搬到{name}"), 8.0);
+        self.t.logs.push(format!("快捷欄跟改名前一樣，是之前名字填錯：{from}記的背包格子和快捷欄顏色搬到{name}"));
     }
 
     fn prompts(&self) -> Vec<(usize, String, Vec<(String, PromptAct, bool)>)> {
@@ -352,7 +374,7 @@ impl Overlay {
                     self.watch[k].mark_hint = Some((mark, self.now()));
                 }
                 self.watch[k].prompt = None;
-                self.watch[k].reset(None);
+                self.watch[k].calm();
                 self.open_settings();
             }
             PromptAct::NotChanged => {
@@ -363,28 +385,15 @@ impl Overlay {
             PromptAct::Revert => self.revert_potion(k),
             PromptAct::Done => {
                 let name = self.t.name(k);
+                let now = self.now();
                 let w = &mut self.watch[k];
                 let from = match w.prompt.take() {
                     Some(Prompt::Mismatch { from }) => Some(from),
                     _ => None,
                 };
                 let from_sig = w.check.take().and_then(|c| c.from_sig);
-                let same = matches!((&from_sig, &w.last_sig), (Some(f), Some(l)) if potions::diff(l, f) < potions::SAME);
+                w.user_done(now, from.zip(from_sig));
                 self.t.logs.push(format!("{name}：按了「快捷欄已經是{name}」"));
-                match from.filter(|_| same) {
-                    Some(from) => {
-                        self.book.move_look(k, &from, &name);
-                        self.book.restore_tpl(k, &name, &self.paths.tpl[k]);
-                        self.refresh_tpl();
-                        self.t.inv_msg.clear();
-                        self.book.save();
-                        let r = self.book.find(k, &name).and_then(|p| p.qs.clone());
-                        self.watch[k].reset(r);
-                        self.t.say(format!("快捷欄一直都是{name}：{from}記的背包格子和快捷欄顏色已經搬到{name}"), 8.0);
-                        self.t.logs.push(format!("快捷欄跟改名前一樣，是之前名字填錯：{from}記的背包格子和快捷欄顏色搬到{name}"));
-                    }
-                    None => self.watch[k].trust_screen(),
-                }
             }
         }
     }

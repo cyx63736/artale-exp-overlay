@@ -143,13 +143,18 @@ impl Book {
     }
 
     pub fn move_look(&mut self, k: usize, from: &str, to: &str) {
+        if self.find(k, to).is_none() {
+            return;
+        }
         let Some(i) = self.list.iter().position(|p| p.kind == k && p.name == from) else { return };
         let (tpl, qs) = (self.list[i].tpl.take(), self.list[i].qs.take());
         let dir = self.dir.clone();
-        let Some(p) = self.find_mut(k, to) else { return };
+        let p = self.find_mut(k, to).unwrap();
         if let Some(t) = tpl {
-            if let Some(old) = p.tpl.replace(t) {
-                let _ = std::fs::remove_file(dir.join(old));
+            if p.tpl.is_none() {
+                p.tpl = Some(t);
+            } else {
+                let _ = std::fs::remove_file(dir.join(t));
             }
         }
         if qs.is_some() {
@@ -223,6 +228,7 @@ pub struct Undo {
     pub cost_prev: f64,
     pub used_mark: i64,
     pub prev_price: Option<f64>,
+    pub session: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +263,14 @@ pub struct Watch {
     trust: bool,
     pub last_sig: Option<Vec<f32>>,
     pub claimed: bool,
+    rename: Option<Rename>,
+}
+
+struct Rename {
+    from: String,
+    sig: Vec<f32>,
+    t0: f64,
+    n: u32,
 }
 
 pub struct Seen<'a> {
@@ -271,6 +285,7 @@ pub struct Seen<'a> {
 pub enum Event {
     None,
     Confirmed,
+    Renamed(String),
 }
 
 impl Watch {
@@ -281,11 +296,21 @@ impl Watch {
         self.odd_since = None;
         self.dirty = false;
         self.trust = false;
+        self.rename = None;
     }
 
     pub fn trust_screen(&mut self) {
         self.reset(None);
         self.trust = true;
+    }
+
+    pub fn calm(&mut self) {
+        self.diff_since = None;
+    }
+
+    pub fn user_done(&mut self, now: f64, from: Option<(String, Vec<f32>)>) {
+        self.trust_screen();
+        self.rename = from.filter(|(_, sig)| strong(sig)).map(|(from, sig)| Rename { from, sig, t0: now, n: 0 });
     }
 
     pub fn feed(&mut self, s: &Seen, book: &[(String, Option<Vec<f32>>)]) -> Event {
@@ -297,6 +322,18 @@ impl Watch {
         self.last_val = Some(s.val);
         if !s.effect {
             self.last_sig = Some(s.sig.to_vec());
+        }
+        if let Some(r) = &mut self.rename {
+            if !s.effect {
+                if diff(s.sig, &r.sig) < SAME {
+                    r.n += 1;
+                } else {
+                    self.rename = None;
+                }
+            }
+            if let Some(r) = self.rename.take_if(|r| r.n >= 3 && s.now - r.t0 >= 5.0) {
+                return Event::Renamed(r.from);
+            }
         }
         if let Some(c) = &mut self.check {
             let e = Self::feed_check(c, &mut self.prompt, &mut self.learn, s);
@@ -436,7 +473,7 @@ mod tests {
     }
 
     fn undo() -> Undo {
-        Undo { name: "沙嗲".into(), price: json!(2600), cost_prev: 0.0, used_mark: 0, prev_price: None }
+        Undo { name: "沙嗲".into(), price: json!(2600), cost_prev: 0.0, used_mark: 0, prev_price: None, session: 1 }
     }
 
     #[test]
@@ -533,13 +570,51 @@ mod tests {
         b.store_tpl(0, "馴鹿奶", &tpl);
         b.set_qs(0, "馴鹿奶", Some(SATAY.to_vec()));
         b.upsert(0, "沙嗲", 2600.0);
+        b.move_look(0, "還沒記的", "沙嗲");
+        b.move_look(0, "馴鹿奶", "不在清單");
+        assert!(b.find(0, "馴鹿奶").unwrap().tpl.is_some());
         b.move_look(0, "馴鹿奶", "沙嗲");
         let (m, s) = (b.find(0, "馴鹿奶").unwrap(), b.find(0, "沙嗲").unwrap());
         assert!(m.tpl.is_none() && m.qs.is_none());
         assert!(s.qs.is_some());
         assert!(b.restore_tpl(0, "沙嗲", &tpl));
         assert_eq!(std::fs::read(&tpl).unwrap(), b"satay");
+        std::fs::write(&tpl, b"ice").unwrap();
+        b.upsert(1, "紅豆刨冰", 3800.0);
+        b.store_tpl(1, "紅豆刨冰", &tpl);
+        std::fs::write(&tpl, b"wrong").unwrap();
+        b.upsert(1, "錯的", 1.0);
+        b.store_tpl(1, "錯的", &tpl);
+        b.move_look(1, "錯的", "紅豆刨冰");
+        assert!(b.find(1, "錯的").unwrap().tpl.is_none());
+        assert!(b.restore_tpl(1, "紅豆刨冰", &tpl));
+        assert_eq!(std::fs::read(&tpl).unwrap(), b"ice");
+        assert_eq!(std::fs::read_dir(dir.join("potions")).unwrap().count(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn done_waits_before_calling_it_a_rename() {
+        let mut w = Watch::default();
+        w.user_done(0.0, Some(("馴鹿奶".into(), SATAY.to_vec())));
+        let mut got = None;
+        for i in 1..6 {
+            if let Event::Renamed(f) = w.feed(&seen(i as f64 * 2.0, &SATAY, 2800), &[]) {
+                got = Some((i, f));
+            }
+        }
+        assert_eq!(got, Some((3, "馴鹿奶".to_string())));
+        let mut w = Watch::default();
+        w.user_done(0.0, Some(("馴鹿奶".into(), SATAY.to_vec())));
+        for i in 1..10 {
+            let sig = if i == 1 { &SATAY } else { &ICE };
+            assert!(!matches!(w.feed(&seen(i as f64 * 2.0, sig, 1200), &[]), Event::Renamed(_)));
+        }
+        let mut w = Watch::default();
+        w.user_done(0.0, Some(("白水".into(), vec![0.0; 12])));
+        for i in 1..10 {
+            assert!(!matches!(w.feed(&seen(i as f64 * 2.0, &[0.0; 12], 800), &[]), Event::Renamed(_)));
+        }
     }
 
     #[test]
