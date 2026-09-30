@@ -1,0 +1,13 @@
+[package]
+name = "ocr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+imageproc = { version = "0.25", default-features = false }
+ndarray = { version = "0.17", default-features = false, features = ["std"] }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }

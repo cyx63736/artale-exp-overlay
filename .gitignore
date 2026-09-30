@@ -1,10 +1,12 @@
+target/
+models/
+*.exe
 config.json
 session.json
 tpl_*.png
+potions.json
+potions/
+digits.json
 *.log
 *.log.old
 *.csv
-__pycache__/
-build/
-dist/
-*.spec

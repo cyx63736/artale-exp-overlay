@@ -1,0 +1,12 @@
+[package]
+name = "reader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+rustfft = "6.4.1"
+serde_json = "1.0.151"
+ocr = { path = "../ocr" }
+tracker = { path = "../tracker" }
+regex = "1.13.1"
