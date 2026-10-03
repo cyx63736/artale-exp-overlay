@@ -54,14 +54,20 @@ pub fn step(o: &mut Overlay) {
     if sel.shot.is_none() && now - sel.start >= 0.3 {
         #[cfg(windows)]
         let img = ocr::capture::Grabber::new().and_then(|g| g.grab(sel.virt.0, sel.virt.1, sel.virt.2, sel.virt.3));
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        let img = ocr::capture::grab_once(sel.virt.0, sel.virt.1, sel.virt.2, sel.virt.3);
+        #[cfg(not(any(windows, target_os = "macos")))]
         let img: Option<Bgr> = None;
         match img {
             Some(img) => sel.shot = Some((img, None)),
             None => sel.done = Some(None),
         }
         if sel.shot.is_none() {
-            o.t.say("出錯了：截不到整個畫面", 10.0);
+            #[cfg(target_os = "macos")]
+            let msg = if ocr::capture::has_permission() { "出錯了：截不到整個畫面" } else { ocr::capture::DENIED_MSG };
+            #[cfg(not(target_os = "macos"))]
+            let msg = "出錯了：截不到整個畫面";
+            o.t.say(msg, 10.0);
         }
     }
     let sel = o.select.as_mut().unwrap();
@@ -79,41 +85,13 @@ pub fn step(o: &mut Overlay) {
             let (cx, cy) = ((x - vx).max(0) as usize, (y - vy).max(0) as usize);
             let (cw, ch) = ((w as usize).min(img.w - cx), (h as usize).min(img.h - cy));
             let crop = reader::cv::crop_bgr(img, cx, cy, cx + cw, cy + ch);
-            if image_rgb(&crop).save(&o.paths.tpl[i]).is_ok() {
-                o.t.inv_msg.clear();
-                forget_potion(&mut o.t, i);
-                if o.names_ok() {
-                    let (n, pr) = (o.t.name(i), o.t.price(i));
-                    o.book.upsert(i, &n, pr);
-                    o.book.store_tpl(i, &n, &o.paths.tpl[i]);
-                    o.book.save();
-                }
-                o.refresh_tpl();
+            if set_tpl(o, i, &crop) {
                 o.t.say(format!("已框選：{name}"), 5.0);
             } else {
                 o.t.say("出錯了：存不了框選的結果", 10.0);
             }
         } else {
-            o.t.cfg.insert(format!("{kind}_region"), serde_json::json!([x, y, w, h]));
-            o.t.raw.insert(kind.clone(), String::new());
-            if kind == "exp" {
-                o.t.pend_dec = None;
-                o.t.reject_n = 0;
-                o.t.exp_last = None;
-                o.t.need = None;
-                o.t.pend_first = None;
-                o.t.pre_inc = None;
-                o.t.rej_run = None;
-            }
-            if kind == "hp" || kind == "mp" {
-                let i = if kind == "hp" { 0 } else { 1 };
-                o.t.forget_qs(i);
-                o.book.clear_qs(i);
-                o.book.save();
-                o.watch[i].reset(None);
-                o.watch[i].check = None;
-                o.watch[i].prompt = None;
-            }
+            set_region(o, &kind, [x, y, w, h]);
             o.save_cfg();
             o.t.say(format!("已框選：{name}"), 5.0);
         }
@@ -122,6 +100,53 @@ pub fn step(o: &mut Overlay) {
         o.open_settings();
     }
     o.shared.wake();
+}
+
+pub fn set_tpl(o: &mut Overlay, i: usize, crop: &Bgr) -> bool {
+    if image_rgb(crop).save(&o.paths.tpl[i]).is_err() {
+        return false;
+    }
+    o.t.inv_msg.clear();
+    forget_potion(&mut o.t, i);
+    if o.names_ok() {
+        let (n, pr) = (o.t.name(i), o.t.price(i));
+        o.book.upsert(i, &n, pr);
+        o.book.store_tpl(i, &n, &o.paths.tpl[i]);
+        o.book.save();
+    }
+    o.refresh_tpl();
+    true
+}
+
+pub fn set_region(o: &mut Overlay, kind: &str, r: [i32; 4]) {
+    let old = region_of(&o.t.cfg, kind);
+    o.t.cfg.insert(format!("{kind}_region"), serde_json::json!(r));
+    o.t.cfg.insert(format!("{kind}_screen"), crate::ui::region_tag(r).into());
+    o.t.raw.insert(kind.to_string(), String::new());
+    if kind == "exp" {
+        o.t.pend_dec = None;
+        o.t.reject_n = 0;
+        o.t.exp_last = None;
+        o.t.need = None;
+        o.t.pend_first = None;
+        o.t.pre_inc = None;
+        o.t.rej_run = None;
+    }
+    if kind == "hp" || kind == "mp" {
+        let i = if kind == "hp" { 0 } else { 1 };
+        o.t.forget_qs(i);
+        if o.names_ok() {
+            let (n, pr) = (o.t.name(i), o.t.price(i));
+            o.book.upsert(i, &n, pr);
+            o.book.reframe_qs(i, &n, old, r);
+        } else {
+            o.book.clear_qs(i);
+        }
+        o.book.save();
+        o.watch[i].reset(None);
+        o.watch[i].check = None;
+        o.watch[i].prompt = None;
+    }
 }
 
 pub fn select_window(o: &mut Overlay, ctx: &egui::Context) {

@@ -11,6 +11,13 @@ pub struct Potion {
     pub price: f64,
     pub tpl: Option<String>,
     pub qs: Option<Vec<f32>>,
+    pub qs_at: Option<[i32; 4]>,
+}
+
+pub fn same_slot(a: [i32; 4], b: [i32; 4]) -> bool {
+    let w = (a[0] + a[2]).min(b[0] + b[2]) - a[0].max(b[0]);
+    let h = (a[1] + a[3]).min(b[1] + b[3]) - a[1].max(b[1]);
+    w > 0 && h > 0 && 2 * w as i64 * h as i64 > (a[2] as i64 * a[3] as i64).min(b[2] as i64 * b[3] as i64)
 }
 
 pub struct Book {
@@ -51,6 +58,7 @@ impl Book {
                             .filter(|_| v.get("qsv").and_then(|x| x.as_i64()) == Some(QS_VERSION))
                             .and_then(|x| x.as_array())
                             .map(|a| a.iter().filter_map(|f| f.as_f64().map(|f| f as f32)).collect()),
+                        qs_at: v.get("qs_at").and_then(|x| serde_json::from_value(x.clone()).ok()),
                     });
                 }
             }
@@ -70,6 +78,7 @@ impl Book {
                     "tpl": p.tpl,
                     "qs": p.qs.as_ref().map(|q| q.iter().map(|f| (*f as f64 * 1e4).round() / 1e4).collect::<Vec<_>>()),
                     "qsv": QS_VERSION,
+                    "qs_at": p.qs_at,
                 })
             })
             .collect();
@@ -99,7 +108,7 @@ impl Book {
         }
         match self.find_mut(k, name) {
             Some(p) => p.price = price,
-            None => self.list.push(Potion { kind: k, name: name.to_string(), price, tpl: None, qs: None }),
+            None => self.list.push(Potion { kind: k, name: name.to_string(), price, tpl: None, qs: None, qs_at: None }),
         }
     }
 
@@ -132,6 +141,10 @@ impl Book {
         true
     }
 
+    pub fn tpl_files(&self) -> Vec<(usize, String, PathBuf)> {
+        self.list.iter().filter_map(|p| Some((p.kind, p.name.clone(), self.dir.join(p.tpl.as_ref()?)))).collect()
+    }
+
     pub fn restore_tpl(&self, k: usize, name: &str, dst: &Path) -> bool {
         if let Some(bytes) = self.find(k, name).and_then(|p| p.tpl.as_ref()).and_then(|f| std::fs::read(self.dir.join(f)).ok()) {
             if std::fs::write(dst, bytes).is_ok() {
@@ -147,7 +160,7 @@ impl Book {
             return;
         }
         let Some(i) = self.list.iter().position(|p| p.kind == k && p.name == from) else { return };
-        let (tpl, qs) = (self.list[i].tpl.take(), self.list[i].qs.take());
+        let (tpl, qs, at) = (self.list[i].tpl.take(), self.list[i].qs.take(), self.list[i].qs_at.take());
         let dir = self.dir.clone();
         let p = self.find_mut(k, to).unwrap();
         if let Some(t) = tpl {
@@ -159,6 +172,9 @@ impl Book {
         }
         if qs.is_some() {
             p.qs = qs;
+        }
+        if at.is_some() {
+            p.qs_at = at;
         }
     }
 
@@ -188,6 +204,35 @@ impl Book {
     pub fn clear_qs(&mut self, k: usize) {
         for p in self.list.iter_mut().filter(|p| p.kind == k) {
             p.qs = None;
+        }
+    }
+
+    pub fn reframe_qs(&mut self, k: usize, name: &str, old: Option<[i32; 4]>, new: [i32; 4]) {
+        let moved = old.filter(|&o| !same_slot(o, new));
+        for p in self.list.iter_mut().filter(|p| p.kind == k) {
+            if p.name == name {
+                p.qs_at = Some(new);
+                p.qs = None;
+            } else if let Some(o) = moved {
+                p.qs_at.get_or_insert(o);
+            } else if p.qs_at.is_none() || p.qs_at == old {
+                p.qs_at = p.qs_at.map(|_| new);
+                p.qs = None;
+            }
+        }
+    }
+
+    pub fn keep_slot(&mut self, k: usize, name: &str, at: Option<[i32; 4]>) {
+        if let Some(p) = self.find_mut(k, name) {
+            if p.qs_at.is_none() {
+                p.qs_at = at;
+            }
+        }
+    }
+
+    pub fn set_slot(&mut self, k: usize, name: &str, at: Option<[i32; 4]>) {
+        if let Some(p) = self.find_mut(k, name) {
+            p.qs_at = at;
         }
     }
 }
@@ -556,6 +601,31 @@ mod tests {
         }
         assert!(w.reference.is_none() && !w.dirty);
         assert_eq!(w.prompt, Some(Prompt::GameChanged { mark: 100, suggest: Some("沙嗲".into()) }));
+    }
+
+    #[test]
+    fn each_potion_keeps_its_slot() {
+        let dir = std::env::temp_dir().join("slot_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut b = Book::load(&dir);
+        let (a, a2, c) = ([100, 100, 40, 20], [98, 102, 44, 20], [200, 100, 40, 20]);
+        for n in ["沙嗲", "馴鹿奶", "蘋果"] {
+            b.upsert(0, n, 1.0);
+            b.set_qs(0, n, Some(SATAY.to_vec()));
+        }
+        b.keep_slot(0, "沙嗲", Some(a));
+        b.reframe_qs(0, "沙嗲", Some(a), a2);
+        assert_eq!(b.find(0, "沙嗲").unwrap().qs_at, Some(a2));
+        assert!(b.list.iter().all(|p| p.qs.is_none()));
+        b.set_qs(0, "沙嗲", Some(SATAY.to_vec()));
+        b.reframe_qs(0, "馴鹿奶", Some(a2), c);
+        assert_eq!(b.find(0, "馴鹿奶").unwrap().qs_at, Some(c));
+        assert_eq!(b.find(0, "沙嗲").unwrap().qs_at, Some(a2));
+        assert_eq!(b.find(0, "蘋果").unwrap().qs_at, Some(a2));
+        assert!(b.find(0, "沙嗲").unwrap().qs.is_some());
+        b.save();
+        assert_eq!(Book::load(&dir).find(0, "馴鹿奶").unwrap().qs_at, Some(c));
     }
 
     #[test]

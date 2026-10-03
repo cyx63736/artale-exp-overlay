@@ -18,6 +18,23 @@ impl Paths {
     pub fn new() -> Paths {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
         let here = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        #[cfg(target_os = "macos")]
+        let (exe_dir, here) = {
+            let data = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| here.clone())
+                .join("Library")
+                .join("Application Support")
+                .join(format!("經驗收益計算器{}", std::env::var("EXPOVERLAY_INSTANCE").unwrap_or_default()));
+            let _ = std::fs::create_dir_all(&data);
+            (here, data)
+        };
+        #[cfg(target_os = "macos")]
+        let models = [exe_dir.join("..").join("Resources").join("models"), exe_dir.join("models"), exe_dir.join("..").join("..").join("..").join("models")]
+            .into_iter()
+            .find(|p| p.join("keys.txt").exists())
+            .unwrap_or_else(|| exe_dir.join("..").join("Resources").join("models"));
+        #[cfg(not(target_os = "macos"))]
         let models = [here.join("models"), here.join("..").join("..").join("..").join("models")]
             .into_iter()
             .find(|p| p.join("keys.txt").exists())

@@ -247,3 +247,13 @@ mod tests {
         assert_eq!(hms(3725.9), "01:02:05");
     }
 }
+
+pub const NAME_MAX: usize = 8;
+
+pub fn short_name(name: &str) -> String {
+    if name.chars().count() <= NAME_MAX {
+        name.to_string()
+    } else {
+        name.chars().take(NAME_MAX - 1).collect::<String>() + "…"
+    }
+}

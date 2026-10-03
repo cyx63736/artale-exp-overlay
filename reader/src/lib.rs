@@ -1,3 +1,4 @@
+pub mod auto;
 pub mod cv;
 pub mod font;
 
@@ -113,6 +114,51 @@ pub fn qs_sig(img: &Bgr) -> Vec<f32> {
     let n = px.len().max(1) as f32;
     v.iter_mut().for_each(|x| *x /= n);
     v
+}
+
+fn join_row(res: &[Item], strict: bool, digits: bool) -> Option<(String, f64)> {
+    let mut boxes: Vec<BoxRow> = vec![];
+    for it in res {
+        let Some(q) = it.quad else { continue };
+        let t = if strict { fix_digits(&it.text) } else { it.text.clone() };
+        if digits && !DIGITS_ONLY.is_match(&t) {
+            continue;
+        }
+        if strict || HAS_DIGIT.is_match(&t) {
+            let ys = q.iter().map(|p| p[1] as f64);
+            let (y0, y1) = (ys.clone().fold(f64::MAX, f64::min), ys.fold(f64::MIN, f64::max));
+            let x0 = q.iter().map(|p| p[0] as f64).fold(f64::MAX, f64::min);
+            boxes.push(((y0 + y1) / 2.0, x0, y0, y1, t, it.score as f64));
+        }
+    }
+    if strict {
+        boxes.retain(|b| !b.4.trim().is_empty());
+    }
+    let best = boxes
+        .iter()
+        .max_by(|a, b| {
+            (a.0, a.1, a.2, a.3)
+                .partial_cmp(&(b.0, b.1, b.2, b.3))
+                .unwrap()
+                .then_with(|| a.4.cmp(&b.4))
+                .then_with(|| a.5.partial_cmp(&b.5).unwrap())
+        })?
+        .clone();
+    let (cy, y0, y1) = (best.0, best.2, best.3);
+    let tol = (6f64).max((y1 - y0) * 0.5);
+    let mut row: Vec<&BoxRow> = boxes.iter().filter(|b| (b.0 - cy).abs() <= tol).collect();
+    row.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let maxc = row.iter().map(|b| b.5).fold(f64::MIN, f64::max);
+    Some((row.iter().map(|b| b.4.as_str()).collect(), maxc))
+}
+
+pub fn quick_count(ocr: &mut Ocr, img: &Bgr) -> Option<i64> {
+    let res = ocr.run(&prep(img), true, true).ok()?;
+    let t = match join_row(&res, false, false) {
+        Some((t, _)) => t,
+        None => flatten(&ocr.run(&prep(img), false, false).ok()?),
+    };
+    parse_count(&t)
 }
 
 pub fn flatten(res: &[Item]) -> String {
@@ -268,7 +314,8 @@ impl Reader {
             if let Some(t) = t.filter(|t| !t.is_empty() && (!strict || !bag_count(t).is_empty())) {
                 let f = self.fonts.get_mut(fname).unwrap();
                 f.reads += 1;
-                if f.reads % 20 != 0 {
+                let complete = "0123456789".chars().all(|c| f.known().contains(c));
+                if complete && f.reads % 20 != 0 {
                     self.font_stat.0 += 1;
                     self.font_log();
                     if let Some(k) = key {
@@ -291,7 +338,9 @@ impl Reader {
             };
             let punct = fname == "meso";
             self.fonts.entry(fname.to_string()).or_insert_with(|| DigitFont::new(punct));
-            if let Some(chk) = check {
+            let known = self.fonts[fname].known();
+            let fresh_digit = val.chars().any(|c| c.is_ascii_digit() && !known.contains(c));
+            if let Some(chk) = check.filter(|_| !fresh_digit) {
                 if !val.is_empty() && val != chk {
                     let f = self.fonts.get_mut(fname).unwrap();
                     f.bad += 1;
@@ -336,44 +385,11 @@ impl Reader {
     fn ocr_count(&mut self, img: &Bgr, strict: bool, fallback: Option<&Bgr>, digits: bool) -> String {
         let arr = prep(img);
         let res = self.ocr(&arr, true, true);
-        let mut boxes: Vec<BoxRow> = vec![];
-        for it in &res {
-            let Some(q) = it.quad else { continue };
-            let t = if strict { fix_digits(&it.text) } else { it.text.clone() };
-            if digits && !DIGITS_ONLY.is_match(&t) {
-                continue;
-            }
-            if strict || HAS_DIGIT.is_match(&t) {
-                let ys = q.iter().map(|p| p[1] as f64);
-                let (y0, y1) = (ys.clone().fold(f64::MAX, f64::min), ys.fold(f64::MIN, f64::max));
-                let x0 = q.iter().map(|p| p[0] as f64).fold(f64::MAX, f64::min);
-                boxes.push(((y0 + y1) / 2.0, x0, y0, y1, t, it.score as f64));
-            }
-        }
-        if strict {
-            boxes.retain(|b| !b.4.trim().is_empty());
-        }
-        if !boxes.is_empty() {
-            let best = boxes
-                .iter()
-                .max_by(|a, b| {
-                    (a.0, a.1, a.2, a.3)
-                        .partial_cmp(&(b.0, b.1, b.2, b.3))
-                        .unwrap()
-                        .then_with(|| a.4.cmp(&b.4))
-                        .then_with(|| a.5.partial_cmp(&b.5).unwrap())
-                })
-                .unwrap()
-                .clone();
-            let (cy, y0, y1) = (best.0, best.2, best.3);
-            let tol = (6f64).max((y1 - y0) * 0.5);
-            let mut row: Vec<&BoxRow> = boxes.iter().filter(|b| (b.0 - cy).abs() <= tol).collect();
-            row.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            let mut text: String = row.iter().map(|b| b.4.as_str()).collect();
+        if let Some((mut text, maxc)) = join_row(&res, strict, digits) {
             if strict {
+                let dotted = text.chars().any(|c| c.is_ascii_digit()) && text.chars().all(|c| c.is_ascii_digit() || c == '.');
                 text = bag_count(&text);
-                let maxc = row.iter().map(|b| b.5).fold(f64::MIN, f64::max);
-                if text.is_empty() && maxc < 0.8 {
+                if text.is_empty() && (maxc < 0.8 || dotted) {
                     if let Some(fb) = fallback {
                         let r = self.rec_only(fb);
                         text = bag_count(&fix_digits(&r));

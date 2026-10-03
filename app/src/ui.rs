@@ -12,6 +12,33 @@ use tracker::util::{comma, comma_f, dur, hms, parse_count, short};
 use tracker::{Tracker, Ui as TUi};
 
 pub const BG: Color32 = Color32::from_rgb(0x14, 0x19, 0x22);
+pub const OVERLAY_RADIUS: u8 = 8;
+pub const WIDGET_RADIUS: u8 = 5;
+
+#[cfg(not(target_os = "macos"))]
+const PPP: [f32; 6] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5];
+#[cfg(not(target_os = "macos"))]
+const Y_CJK_M: [f32; 6] = [-0.20, -0.18, -0.18, -0.20, -0.135, -0.19];
+#[cfg(not(target_os = "macos"))]
+const Y_CJK_LBL: [f32; 6] = [-0.19, -0.25, -0.19, -0.22, -0.19, -0.22];
+#[cfg(target_os = "macos")]
+const PPP: [f32; 1] = [2.0];
+#[cfg(target_os = "macos")]
+const Y_CJK_M: [f32; 1] = [-0.035];
+#[cfg(target_os = "macos")]
+const Y_CJK_LBL: [f32; 1] = [0.06];
+#[cfg(not(target_os = "macos"))]
+const Y_SYM_M_EXTRA: f32 = 0.0;
+#[cfg(target_os = "macos")]
+const Y_SYM_M_EXTRA: f32 = 0.135;
+#[cfg(not(target_os = "macos"))]
+const Y_SYM_BTN: f32 = -0.30;
+#[cfg(target_os = "macos")]
+const Y_SYM_BTN: f32 = 0.075;
+#[cfg(not(target_os = "macos"))]
+const ICON_DY: f32 = 3.2;
+#[cfg(target_os = "macos")]
+const ICON_DY: f32 = 0.0;
 pub const PANEL: Color32 = Color32::from_rgb(0x1f, 0x27, 0x35);
 pub const LINE: Color32 = Color32::from_rgb(0x2e, 0x38, 0x4b);
 pub const INK: Color32 = Color32::from_rgb(0xe6, 0xea, 0xf2);
@@ -31,9 +58,6 @@ pub fn font(p: f32) -> FontId {
 pub fn bold(p: f32) -> FontId {
     FontId::new(pt(p), FontFamily::Name("bold".into()))
 }
-fn btn_font(p: f32) -> FontId {
-    FontId::new(pt(p), FontFamily::Name("btn".into()))
-}
 fn lbl_font(p: f32) -> FontId {
     FontId::new(pt(p), FontFamily::Name("lbl".into()))
 }
@@ -41,12 +65,69 @@ pub fn mono(p: f32, b: bool) -> FontId {
     FontId::new(pt(p), FontFamily::Name(if b { "mono_bold" } else { "mono" }.into()))
 }
 
-const BTN_HINTS: [(&str, &str); 6] = [
-    ("run", "開始／暫停計時（Ctrl+F10）"),
-    ("rec", "手動輸入 EXP 或藥水總數：自動讀不到時才需要用（Ctrl+F11）"),
+const ICON_BOX: f32 = 18.0;
+
+fn draw_icon(p: &egui::Painter, rect: egui::Rect, kind: &str, counting: bool, col: Color32) {
+    use egui::{pos2, Rect, Shape, Stroke};
+    let c = rect.center();
+    let st = Stroke::new(1.6, col);
+    let at = |x: f32, y: f32| pos2(c.x + x, c.y + y);
+    match kind {
+        "run" if counting => {
+            for x in [-4.0, 1.5] {
+                p.rect_filled(Rect::from_min_max(at(x, -5.0), at(x + 2.5, 5.0)), 0.8, col);
+            }
+        }
+        "run" => {
+            p.add(Shape::convex_polygon(vec![at(-3.0, -5.0), at(5.0, 0.0), at(-3.0, 5.0)], col, Stroke::new(1.0, col)));
+        }
+        "set" => {
+            let ppp = p.ctx().pixels_per_point();
+            let (mid, gap) = ((c.y * ppp).round() / ppp, (4.5 * ppp).round() / ppp);
+            for k in [-1.0, 0.0, 1.0] {
+                let y = mid + k * gap - c.y;
+                p.line_segment([at(-5.5, y), at(5.5, y)], st);
+            }
+        }
+        "reset" => {
+            let (r, a0, a1) = (5.5, (-10.0f32).to_radians(), 255.0f32.to_radians());
+            let pts = (0..=28)
+                .map(|i| {
+                    let a = a0 + (a1 - a0) * i as f32 / 28.0;
+                    at(r * a.cos(), r * a.sin())
+                })
+                .collect();
+            p.add(Shape::line(pts, st));
+            let end = at(r * a1.cos(), r * a1.sin());
+            let (d, n) = (egui::vec2(-a1.sin(), a1.cos()), egui::vec2(a1.cos(), a1.sin()));
+            p.add(Shape::convex_polygon(vec![end + d * 3.4, end + n * 2.9 - d * 0.6, end - n * 2.9 - d * 0.6], col, Stroke::NONE));
+        }
+        "compact" => {
+            p.rect_stroke(Rect::from_min_max(at(-5.5, -4.0), at(5.5, 4.0)), 1.5, st, egui::StrokeKind::Middle);
+            p.line_segment([at(-2.5, 0.0), at(2.5, 0.0)], st);
+        }
+        _ => {
+            p.line_segment([at(-4.5, -4.5), at(4.5, 4.5)], st);
+            p.line_segment([at(4.5, -4.5), at(-4.5, 4.5)], st);
+        }
+    }
+}
+
+fn btn_hints() -> &'static [(&'static str, String)] {
+    static H: std::sync::OnceLock<Vec<(&'static str, String)>> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        let [run, _] = platform::HOTKEY_NAMES;
+        let mut v = vec![("run", format!("開始／暫停計時（{run}）"))];
+        v.extend(BTN_HINTS_REST.iter().map(|(k, t)| (*k, t.to_string())));
+        v
+    })
+}
+
+const BTN_HINTS_REST: [(&str, &str); 5] = [
     ("set", "設定：藥水價格、框選要自動讀取的位置"),
     ("reset", "結束這一段：成績存進練功紀錄.csv，重新開始算（要連按兩下）"),
     ("compact", "切換精簡模式（只顯示一行）"),
+    ("normal", "切換一般模式（顯示詳細內容）"),
     ("close", "關閉浮窗（會先存紀錄）"),
 ];
 
@@ -78,7 +159,59 @@ pub struct Overlay {
     pub last_record_fg: Option<isize>,
     pub book: Book,
     pub watch: [Watch; 2],
+    pub hint: Option<(u8, f64)>,
+    pub auto: Option<crate::autoframe::AutoRun>,
+    pub auto_pick: Option<crate::autoframe::AutoPick>,
+    scale: f64,
+    zoom_seen: f32,
+    bad_since: Option<f64>,
+    bad_hold: f64,
+    screen_warned: Option<String>,
 }
+
+pub struct HintGeom {
+    pub pos: (i32, i32),
+    pub size: (i32, i32),
+    pub frame: (i32, i32, i32, i32),
+    pub hole: (i32, i32, i32, i32),
+    pub tab: (i32, i32, i32, i32),
+    pub radius: i32,
+    pub text: String,
+}
+
+pub fn region_of(cfg: &serde_json::Map<String, serde_json::Value>, kind: &str) -> Option<[i32; 4]> {
+    let r: Vec<i32> = cfg.get(&format!("{kind}_region"))?.as_array()?.iter().filter_map(|v| v.as_f64()).map(|v| v as i32).collect();
+    r.try_into().ok()
+}
+
+pub use tracker::util::{short_name as disp, NAME_MAX};
+
+pub fn screen_key() -> String {
+    let (_, _, w, h) = platform::primary_screen();
+    format!("{w}x{h}")
+}
+
+fn zoom_key() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let s = ocr::capture::scale();
+        if (s - 1.0).abs() > 0.01 {
+            return format!("{}@{s}", screen_key());
+        }
+    }
+    screen_key()
+}
+
+pub const ZOOM_MAX: f32 = 2.0;
+
+pub fn region_tag(r: [i32; 4]) -> String {
+    platform::screen_tag(r[0] + r[2] / 2, r[1] + r[3] / 2)
+}
+
+pub const HINT_PICK: u8 = 10;
+
+const HINT_SEC: f64 = 5.0;
+pub const HINT: Color32 = Color32::from_rgb(0xff, 0x3b, 0x30);
 
 #[derive(Clone)]
 pub enum PromptAct {
@@ -87,16 +220,29 @@ pub enum PromptAct {
     NotChanged,
     Revert,
     Done,
+    AutoPick(usize),
+    AutoSkip,
 }
 
 pub fn setup_ctx(ctx: &egui::Context) {
-    ctx.set_fonts(fonts().clone());
+    ctx.set_fonts(fonts_for(PPP.len() - 1));
     ctx.set_theme(egui::Theme::Dark);
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         style.interaction.selectable_labels = false;
         style.visuals.panel_fill = BG;
         style.visuals.window_fill = BG;
         style.visuals.extreme_bg_color = PANEL;
+        let r = egui::CornerRadius::same(WIDGET_RADIUS);
+        for w in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
+            w.corner_radius = r;
+        }
+        style.visuals.menu_corner_radius = r;
     });
 }
 
@@ -140,6 +286,14 @@ impl Overlay {
             last_record_fg: None,
             book,
             watch: Default::default(),
+            hint: None,
+            auto: None,
+            auto_pick: None,
+            scale: 1.0,
+            zoom_seen: 1.0,
+            bad_since: None,
+            bad_hold: 0.0,
+            screen_warned: None,
         }
         .init_book()
     }
@@ -163,6 +317,45 @@ impl Overlay {
 
     pub fn now(&self) -> f64 {
         self.t.now()
+    }
+
+    fn check_screen(&mut self) {
+        if self.auto.is_some() || self.auto_pick.is_some() {
+            return;
+        }
+        let old = self.t.cfg.get("region_screen").and_then(|v| v.as_str()).map(|o| o != screen_key());
+        let mut moved: Vec<String> = vec![];
+        let mut fill = false;
+        for k in ["exp", "hp", "mp", "inv", "meso"] {
+            let Some(r) = region_of(&self.t.cfg, k) else { continue };
+            let now = region_tag(r);
+            let key = format!("{k}_screen");
+            match self.t.cfg.get(&key).and_then(|v| v.as_str()) {
+                Some(t) if t != now => moved.push(now),
+                Some(_) => {}
+                None if old == Some(true) => moved.push(now),
+                None => {
+                    self.t.cfg.insert(key, now.into());
+                    fill = true;
+                }
+            }
+        }
+        if fill {
+            self.save_cfg();
+        }
+        if moved.is_empty() {
+            self.screen_warned = None;
+            return;
+        }
+        moved.sort();
+        moved.dedup();
+        let sig = moved.join(" ");
+        if self.screen_warned.as_deref() != Some(sig.as_str()) {
+            self.screen_warned = Some(sig);
+            let msg = "螢幕解析度變了，之前框的位置可能不準，請打開背包、切到消耗欄，再按設定裡的「自動框選」";
+            self.t.say(msg, 15.0);
+            self.t.logs.push(msg.into());
+        }
     }
 
     pub fn names_ok(&self) -> bool {
@@ -263,8 +456,19 @@ impl Overlay {
             self.book.set_qs(k, &old, from_sig.clone());
         }
         let v0 = self.t.qs[k];
+        let here = region_of(&self.t.cfg, potions::KIND[k]);
+        self.book.keep_slot(k, &old, here);
         self.t.switch_potion(k, name, price, mark);
         self.book.upsert(k, name, price);
+        let moved = if verify { self.book.find(k, name).and_then(|p| p.qs_at).filter(|&r| Some(r) != here) } else { None };
+        if !verify {
+            self.book.set_slot(k, name, here);
+        }
+        if let Some(r) = moved {
+            self.t.cfg.insert(format!("{}_region", potions::KIND[k]), serde_json::json!(r));
+            self.t.raw.insert(potions::KIND[k].into(), String::new());
+            self.t.logs.push(format!("{name} 放在快捷欄的另一格，改讀它記住的位置"));
+        }
         let has_tpl = self.book.restore_tpl(k, name, &self.paths.tpl[k]);
         self.refresh_tpl();
         self.t.inv_msg.clear();
@@ -276,12 +480,72 @@ impl Overlay {
         w.reset(r);
         w.prompt = None;
         w.mark_hint = None;
-        w.check = if verify { Some(Check { t0: now, from_sig, v0, same: 0, changed: 0, undo }) } else { None };
+        w.check = if verify && moved.is_none() { Some(Check { t0: now, from_sig, v0, same: 0, changed: 0, undo }) } else { None };
         if !has_tpl && self.t.has("inv_region") {
-            self.t.say(format!("已換成{name}，請打開背包按 ⚙ 框選一次{name}"), 12.0);
+            self.t.say(format!("已換成{name}，請打開背包按 ☰ 框選一次{name}"), 12.0);
         } else {
             self.t.say(format!("已換成{name}"), 4.0);
         }
+        self.show_hint(1 | 1 << (k + 1));
+    }
+
+    pub fn show_hint(&mut self, mask: u8) {
+        let now = self.now();
+        let old = self.hint.filter(|h| now - h.1 < HINT_SEC).map_or(0, |h| h.0);
+        self.hint = Some((old | mask, now));
+    }
+
+    pub fn hint_geom(&self, i: u8) -> Option<HintGeom> {
+        let ([x, y, w, h], text) = if i >= HINT_PICK {
+            let r = self.auto_pick.as_ref()?.pairs.get((i - HINT_PICK) as usize)?.qs.rect;
+            ([r.0, r.1, r.2, r.3], format!("{}", i - HINT_PICK + 1))
+        } else {
+            let (mask, t0) = self.hint?;
+            if self.now() - t0 >= HINT_SEC || mask & (1 << i) == 0 {
+                return None;
+            }
+            let (key, text) = match i {
+                0 => ("inv", "背包".to_string()),
+                3 => ("exp", "EXP".to_string()),
+                4 => ("meso", "楓幣".to_string()),
+                _ => (potions::KIND[i as usize - 1], format!("{} 快捷欄", disp(&self.t.name(i as usize - 1)))),
+            };
+            (region_of(&self.t.cfg, key)?, text)
+        };
+        let s = self.scale;
+        let px = |p: f64| (p * s).round() as i32;
+        let (gap, bw) = (px(3.0), px(3.0).max(2));
+        let tw = px(text.chars().map(|c| if c.is_ascii() { 8.0 } else { 14.5 }).sum::<f64>() + 14.0);
+        let th = px(20.0);
+        let tg = px(3.0);
+        let (ox, oy, ow, oh) = (x - gap - bw, y - gap - bw, w + 2 * (gap + bw), h + 2 * (gap + bw));
+        let (vx, vy, vw, _) = platform::virtual_screen();
+        let (tx, ty) = if i == 0 || i == 3 || i >= HINT_PICK {
+            (ox, if oy - th - tg >= vy { oy - th - tg } else { oy + oh + tg })
+        } else {
+            (if ox - tw - tg >= vx || ox + ow + tg + tw > vx + vw { ox - tw - tg } else { ox + ow + tg }, oy)
+        };
+        let (left, top) = (ox.min(tx), oy.min(ty));
+        let (right, bottom) = ((ox + ow).max(tx + tw), (oy + oh).max(ty + th));
+        Some(HintGeom {
+            pos: (left, top),
+            size: (right - left, bottom - top),
+            frame: (ox - left, oy - top, ow, oh),
+            hole: (x - gap - left, y - gap - top, w + 2 * gap, h + 2 * gap),
+            tab: (tx - left, ty - top, tw, th),
+            radius: px(6.0),
+            text,
+        })
+    }
+
+    fn hint_ui(&mut self, ctx: &egui::Context, i: u8) {
+        let Some(g) = self.hint_geom(i) else { return };
+        let ppp = ctx.pixels_per_point();
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(HINT)).show(ctx, |ui| {
+            let (x, y, w, h) = g.tab;
+            let r = egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp));
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, &g.text, bold(10.0), Color32::WHITE);
+        });
     }
 
     fn revert_potion(&mut self, k: usize) {
@@ -331,11 +595,12 @@ impl Overlay {
                 Some(Prompt::GameChanged { suggest, .. }) => {
                     let mut btns: Vec<(String, PromptAct, bool)> = vec![];
                     if let Some(s) = suggest {
-                        btns.push((s.clone(), PromptAct::Pick(s.clone()), true));
+                        btns.push((disp(s), PromptAct::Pick(s.clone()), true));
                     }
                     for p in self.book.of(k).iter().filter(|p| p.name != name && Some(&p.name) != suggest.as_ref()).take(5) {
-                        btns.push((p.name.clone(), PromptAct::Pick(p.name.clone()), false));
+                        btns.push((disp(&p.name), PromptAct::Pick(p.name.clone()), false));
                     }
+                    let name = disp(&name);
                     btns.push(("其他…".into(), PromptAct::Other, false));
                     btns.push(("沒換".into(), PromptAct::NotChanged, false));
                     let text = if suggest.is_some() || btns.len() > 2 {
@@ -346,6 +611,7 @@ impl Overlay {
                     v.push((k, text, btns));
                 }
                 Some(Prompt::Mismatch { from }) => {
+                    let (name, from) = (disp(&name), disp(from));
                     v.push((
                         k,
                         format!("設定換成{name}，但快捷欄看起來還是{from}"),
@@ -355,11 +621,22 @@ impl Overlay {
                 None => {}
             }
         }
+        if let Some(p) = &self.auto_pick {
+            if let Some(&k) = p.todo.first() {
+                let n = p.used.iter().filter(|u| !**u).count();
+                let mut btns: Vec<(String, PromptAct, bool)> =
+                    (0..p.pairs.len()).filter(|&i| !p.used[i]).map(|i| (format!("{}", i + 1), PromptAct::AutoPick(i), false)).collect();
+                btns.push(("都不是".into(), PromptAct::AutoSkip, false));
+                v.push((k, format!("快捷欄有 {n} 種藥水，哪一格是{}？（看紅框旁的號碼）", disp(&self.t.name(k))), btns));
+            }
+        }
         v
     }
 
     fn prompt_action(&mut self, k: usize, a: PromptAct) {
         match a {
+            PromptAct::AutoPick(i) => crate::autoframe::pick(self, i),
+            PromptAct::AutoSkip => crate::autoframe::skip(self),
             PromptAct::Pick(name) => {
                 let mark = match self.watch[k].prompt {
                     Some(Prompt::GameChanged { mark, .. }) => Some(mark),
@@ -413,6 +690,7 @@ impl Overlay {
                     self.t.ocr_msg = e;
                 }
                 Msg::Logs(l) => files::log_detail(&self.paths.detail, &l),
+                Msg::Auto(f, img) => crate::autoframe::found(self, *f, *img),
                 Msg::Ocr(o) => {
                     self.t.on_ocr(&o);
                     self.watch_ocr(&o);
@@ -425,7 +703,6 @@ impl Overlay {
         while let Ok(k) = self.hk.try_recv() {
             match k {
                 Hotkey::Pause => self.t.toggle_run(0.0),
-                Hotkey::Record => self.open_record(),
                 Hotkey::Toggle => {
                     if self.select.is_some() {
                         continue;
@@ -483,11 +760,15 @@ impl Overlay {
     pub fn open_settings(&mut self) {
         match &mut self.settings {
             Some(s) => s.focus = true,
-            None => self.settings = Some(Settings::new(&self.t)),
+            None => {
+                let mut s = Settings::new(&self.t);
+                s.zoom = self.zoom();
+                self.settings = Some(s);
+            }
         }
     }
 
-    fn quit(&mut self) -> bool {
+    pub fn quit(&mut self) -> bool {
         let now = self.now();
         let armed = self.quit_armed;
         if !self.t.save_state() && now - armed >= 5.0 {
@@ -509,12 +790,42 @@ impl Overlay {
     }
 }
 
-fn fonts() -> &'static egui::FontDefinitions {
-    static F: std::sync::OnceLock<egui::FontDefinitions> = std::sync::OnceLock::new();
+type Base = (egui::FontDefinitions, Option<&'static [u8]>, Option<&'static [u8]>, Option<&'static [u8]>);
+fn fonts() -> &'static Base {
+    static F: std::sync::OnceLock<Base> = std::sync::OnceLock::new();
     F.get_or_init(load_fonts)
 }
 
-fn load_fonts() -> egui::FontDefinitions {
+fn ppp_slot(ppp: f32) -> usize {
+    (0..PPP.len()).min_by(|&a, &b| (PPP[a] - ppp).abs().total_cmp(&(PPP[b] - ppp).abs())).unwrap_or(0)
+}
+
+fn fonts_for(i: usize) -> egui::FontDefinitions {
+    let (base, cjk, cjk_b, sym) = fonts();
+    let mut defs = base.clone();
+    let mut put = |name: &str, data: Option<&'static [u8]>, f: f32| {
+        if let Some(bytes) = data {
+            let fd = egui::FontData::from_static(bytes).tweak(egui::FontTweak { y_offset_factor: f, ..Default::default() });
+            defs.font_data.insert(name.to_string(), Arc::new(fd));
+        }
+    };
+    put("cjk_m", *cjk, Y_CJK_M[i]);
+    put("cjk_bold_m", *cjk_b, Y_CJK_M[i]);
+    put("sym_m", *sym, Y_CJK_M[i] + Y_SYM_M_EXTRA);
+    put("cjk_lbl", *cjk, Y_CJK_LBL[i]);
+    defs
+}
+
+pub fn sync_fonts(ctx: &egui::Context) {
+    let i = ppp_slot(ctx.pixels_per_point());
+    let id = egui::Id::new("font_ppp_slot");
+    if ctx.data(|d| d.get_temp::<usize>(id)) != Some(i) {
+        ctx.data_mut(|d| d.insert_temp(id, i));
+        ctx.set_fonts(fonts_for(i));
+    }
+}
+
+fn load_fonts() -> Base {
     let mut defs = egui::FontDefinitions::default();
     let mut add = |name: &str, paths: &[&str], index: u32| -> Option<&'static [u8]> {
         for p in paths {
@@ -529,45 +840,47 @@ fn load_fonts() -> egui::FontDefinitions {
         None
     };
     let win = |f: &str| format!(r"C:\Windows\Fonts\{f}");
-    let cjk_data = add("cjk", &[&win("msjh.ttc"), "/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc"], 0);
-    let cjk_b_data = add("cjk_bold", &[&win("msjhbd.ttc"), &win("msjh.ttc"), "/System/Library/Fonts/PingFang.ttc"], 0);
+    let cjk_data = add("cjk", &[&win("msjh.ttc"), "/System/Library/Fonts/STHeiti Light.ttc", "/System/Library/Fonts/STHeiti Medium.ttc", "/System/Library/Fonts/PingFang.ttc"], 0);
+    let cjk_b_data = add("cjk_bold", &[&win("msjhbd.ttc"), &win("msjh.ttc"), "/System/Library/Fonts/STHeiti Medium.ttc", "/System/Library/Fonts/PingFang.ttc"], 0);
     let mono = add("mono", &[&win("consola.ttf"), "/System/Library/Fonts/Menlo.ttc"], 0).is_some();
     let mono_b = add("mono_b", &[&win("consolab.ttf"), &win("consola.ttf"), "/System/Library/Fonts/Menlo.ttc"], 0).is_some();
     let sym_data = add("sym", &[&win("seguisym.ttf"), "/System/Library/Fonts/Apple Symbols.ttf"], 0);
     let sym = sym_data.is_some();
+    let sym2 = add("sym2", &["/System/Library/Fonts/ZapfDingbats.ttf"], 0).is_some();
     let (cjk, cjk_b) = (cjk_data.is_some(), cjk_b_data.is_some());
-    for (name, data) in [("cjk_m", cjk_data), ("cjk_bold_m", cjk_b_data)] {
-        if let Some(bytes) = data {
-            let fd = egui::FontData::from_static(bytes).tweak(egui::FontTweak { y_offset_factor: -0.253, ..Default::default() });
-            defs.font_data.insert(name.to_string(), Arc::new(fd));
-        }
-    }
-    for (name, data, f) in [("sym_btn", sym_data, -0.30), ("cjk_lbl", cjk_data, -0.19)] {
+    let last = PPP.len() - 1;
+    for (name, data, f) in [
+        ("cjk_m", cjk_data, Y_CJK_M[last]),
+        ("cjk_bold_m", cjk_b_data, Y_CJK_M[last]),
+        ("sym_btn", sym_data, Y_SYM_BTN),
+        ("cjk_lbl", cjk_data, Y_CJK_LBL[last]),
+        ("sym_m", sym_data, Y_CJK_M[last] + Y_SYM_M_EXTRA),
+    ] {
         if let Some(bytes) = data {
             let fd = egui::FontData::from_static(bytes).tweak(egui::FontTweak { y_offset_factor: f, ..Default::default() });
             defs.font_data.insert(name.to_string(), Arc::new(fd));
         }
     }
     let fam = |v: &[(&str, bool)]| -> Vec<String> { v.iter().filter(|(_, ok)| *ok).map(|(n, _)| n.to_string()).collect() };
-    let mut prop = fam(&[("cjk", cjk), ("sym", sym)]);
+    let mut prop = fam(&[("cjk", cjk), ("sym", sym), ("sym2", sym2)]);
     prop.extend(defs.families[&FontFamily::Proportional].clone());
-    let mut boldf = fam(&[("cjk_bold", cjk_b), ("cjk", cjk), ("sym", sym)]);
+    let mut boldf = fam(&[("cjk_bold", cjk_b), ("cjk", cjk), ("sym", sym), ("sym2", sym2)]);
     boldf.extend(defs.families[&FontFamily::Proportional].clone());
-    let mut monof = fam(&[("mono", mono), ("cjk_m", cjk), ("sym", sym)]);
+    let mut monof = fam(&[("mono", mono), ("cjk_m", cjk), ("sym_m", sym), ("sym2", sym2)]);
     monof.extend(defs.families[&FontFamily::Monospace].clone());
-    let mut monob = fam(&[("mono_b", mono_b), ("cjk_bold_m", cjk_b), ("sym", sym)]);
+    let mut monob = fam(&[("mono_b", mono_b), ("cjk_bold_m", cjk_b), ("sym_m", sym), ("sym2", sym2)]);
     monob.extend(defs.families[&FontFamily::Monospace].clone());
     defs.families.insert(FontFamily::Proportional, prop);
     defs.families.insert(FontFamily::Name("bold".into()), boldf);
     defs.families.insert(FontFamily::Monospace, monof.clone());
     defs.families.insert(FontFamily::Name("mono".into()), monof);
     defs.families.insert(FontFamily::Name("mono_bold".into()), monob);
-    for (n, v) in [("btn", [("sym_btn", sym), ("cjk", cjk)]), ("lbl", [("cjk_lbl", cjk), ("sym", sym)])] {
+    for (n, v) in [("btn", [("sym_btn", sym), ("cjk", cjk), ("sym2", sym2)]), ("lbl", [("cjk_lbl", cjk), ("sym", sym), ("sym2", sym2)])] {
         let mut f = fam(&v);
         f.extend(defs.families[&FontFamily::Monospace].clone());
         defs.families.insert(FontFamily::Name(n.into()), f);
     }
-    defs
+    (defs, cjk_data, cjk_b_data, sym_data)
 }
 
 type Seg = (String, Color32);
@@ -608,7 +921,7 @@ impl Overlay {
         let ocr_bad = msg.starts_with("自動讀取：") && (msg.contains("讀不到") || msg.contains("失敗"));
         let mut plain = true;
         if t.ocr_seen > 0.0 && now - t.ocr_seen > 20.0 && ["exp_region", "hp_region", "mp_region", "inv_region"].iter().any(|k| t.has(k)) {
-            msg = "自動讀取停住了，按 ⚙ 檢查".into();
+            msg = "自動讀取停住了，按 ☰ 檢查".into();
             col = HP;
             plain = false;
         }
@@ -617,20 +930,20 @@ impl Overlay {
             col = HP;
             plain = false;
         } else if !t.has("exp_region") {
-            msg = "① 按 ⚙ 改藥水名稱、價格，並「框選」畫面下方的 EXP 數字".into();
+            msg = "① 按 ☰ 改藥水名稱、價格，並「框選」畫面下方的 EXP 數字".into();
             col = WARN;
             plain = false;
             if !t.running {
-                msg += "\n② 按 ▶ 開始計時（Ctrl+F10）";
+                msg += &format!("\n② 按 ▶ 開始計時（{}）", platform::HOTKEY_NAMES[0]);
             }
         } else if !t.running {
-            msg = format!("按 ▶ 開始計時（Ctrl+F10）\n{msg}");
+            msg = format!("按 ▶ 開始計時（{}）\n{msg}", platform::HOTKEY_NAMES[0]);
         }
         for k in 0..2 {
             if t.counting() && t.cap_since[k].map_or(false, |c| now - c > 300.0) {
                 msg += &format!(
                     "\n{}快捷欄一直停在 {}，即時看不到用量，\n請打開背包更新",
-                    t.name(k),
+                    disp(&t.name(k)),
                     t.cfg.get("stack_max").map_or("".into(), |v| v.to_string())
                 );
                 col = WARN;
@@ -679,7 +992,7 @@ struct View {
     pairs: Vec<(String, Color32, String, String, Color32)>,
     ones: Vec<(String, Color32, String)>,
     earn_col: Color32,
-    compact: String,
+    compact: Vec<(String, String, Color32)>,
     show_meso: bool,
 }
 
@@ -786,11 +1099,11 @@ impl Overlay {
         let label = |k: &str| -> (String, Color32) {
             match k {
                 "exp" => ("EXP".into(), EXP),
-                "hp" => (t.name(0), HP),
-                "mp" => (t.name(1), MP),
+                "hp" => (disp(&t.name(0)), HP),
+                "mp" => (disp(&t.name(1)), MP),
                 "cost" => ("藥水花費".into(), HP),
                 "income" => ("撿錢".into(), EXP),
-                _ => ("淨賺".into(), GOOD),
+                _ => ("淨收益".into(), GOOD),
             }
         };
         let show_meso = t.has("meso_region");
@@ -811,7 +1124,7 @@ impl Overlay {
         } else if show_meso {
             (format!("藥水花了 {}（開背包讀楓幣後算收益）", short(Some(s.cost))), MUTED)
         } else {
-            (format!("藥水花了 {}（⚙ 框選背包楓幣就能算收益）", short(Some(s.cost))), MUTED)
+            (format!("藥水花了 {}（☰ 框選背包楓幣就能算收益）", short(Some(s.cost))), MUTED)
         };
         ones.push(("本次收益".into(), earn_col, earn));
         let (mut lv_txt, mut lv_time) = ("–".to_string(), None);
@@ -822,30 +1135,27 @@ impl Overlay {
         } else if let Some((exp, _)) = t.exp_last {
             lv_txt = comma(exp);
         }
-        ones.push(("升級".into(), MP, lv_txt));
+        ones.push(("預估升級".into(), MP, lv_txt));
         for k in 0..2 {
             let hr = if k == 0 { s.hp_hr } else { s.mp_hr };
             let txt = if let Some(left) = t.est_total(k) {
                 comma(left) + &hr.filter(|&h| h != 0.0).map_or(String::new(), |h| format!("  預計可用 {}", dur(Some(left as f64 / h * 3600.0))))
             } else if let Some(q) = t.qs[k] {
-                format!("快捷欄 {}（開背包看總數）", comma(q))
+                format!("快捷欄 {q}（開背包看總數）")
             } else {
                 "–".into()
             };
-            ones.push((format!("{}剩", t.name(k)), if k == 0 { HP } else { MP }, txt));
+            ones.push((format!("{}剩", disp(&t.name(k))), if k == 0 { HP } else { MP }, txt));
         }
-        let (exp_r, exp_a) = (rates[0].1, rates[0].2);
-        let exp_txt = if early {
-            format!("EXP {}（預估{span_name}）", short(exp_a))
-        } else {
-            format!("EXP {}｜{}（{uname}）", short(exp_r), short(exp_a))
-        };
-        let compact = format!(
-            "{exp_txt}│ 花{}{} │ 升級 {}",
-            short(rates[3].2),
-            rates[5].2.map_or(String::new(), |p| format!(" │ 淨{}", short(Some(p)))),
-            dur(lv_time)
-        );
+        let mut compact = vec![
+            ("累積EXP".to_string(), short(Some(t.gain as f64)), EXP),
+            ((if unit == 600.0 { "每十分" } else { "每小時" }).to_string(), short(rates[0].2), EXP),
+            ("藥水花費".to_string(), short(rates[3].2), EXP),
+        ];
+        if let Some(p) = rates[5].2 {
+            compact.push(("淨收益".to_string(), short(Some(p)), if p < 0.0 { HP } else { GOOD }));
+        }
+        compact.push(("預估升級".to_string(), dur(lv_time), EXP));
         View {
             timer: hms(a),
             dot: if t.counting() {
@@ -902,8 +1212,36 @@ impl Overlay {
         }
     }
 
+    pub fn hwnd_of(&self, k: Kind) -> Option<isize> {
+        self.hwnds.iter().find(|h| h.0 == k).map(|h| h.1)
+    }
+
     pub fn overlay_visible(&self) -> bool {
-        self.visible && self.select.is_none()
+        self.visible && self.select.is_none() && !self.auto.as_ref().map_or(false, |a| a.hiding())
+    }
+
+    pub fn zoom(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        let grow = ZOOM_MAX as f64;
+        #[cfg(not(target_os = "macos"))]
+        let grow = 1.0;
+        let auto = || {
+            let (_, _, _, sh) = platform::primary_screen();
+            (sh as f64 / (1080.0 * self.scale)).min(grow)
+        };
+        let set = self.t.cfg.get("zoom_by_screen").and_then(|m| m.get(&zoom_key())).and_then(|x| x.as_f64());
+        set.unwrap_or_else(auto).clamp(0.6, ZOOM_MAX as f64) as f32
+    }
+
+    pub fn dialog_zoom(&self) -> f32 {
+        self.zoom().max(1.0)
+    }
+
+    pub fn set_zoom(&mut self, z: f32) {
+        let mut m = self.t.cfg.get("zoom_by_screen").and_then(|m| m.as_object().cloned()).unwrap_or_default();
+        m.insert(zoom_key(), (z as f64).into());
+        self.t.cfg.insert("zoom_by_screen".into(), m.into());
+        self.t.cfg.remove("zoom");
     }
 
     pub fn alpha(&self) -> f32 {
@@ -925,11 +1263,12 @@ impl Overlay {
         let mut v = vec![];
         let (ox, oy) = self.home();
         let scale = overlay.map_or(1.0, |o| o.4);
+        self.scale = scale;
         v.push(Spec {
             kind: Kind::Overlay,
             title: "經驗收益計算器",
             pos: (ox, oy),
-            size: ((self.size.x as f64 * scale) as u32, (self.size.y as f64 * scale) as u32),
+            size: ((self.size.x as f64 * scale * self.zoom() as f64) as u32, (self.size.y as f64 * scale * self.zoom() as f64) as u32),
             decorations: false,
         });
         if self.select.is_some() {
@@ -938,7 +1277,17 @@ impl Overlay {
             }
             return v;
         }
+        if self.auto.as_ref().map_or(false, |a| a.hiding()) {
+            return v;
+        }
+        let picks = self.auto_pick.as_ref().map_or(0, |p| p.pairs.len() as u8);
+        for i in (0..5).chain(HINT_PICK..HINT_PICK + picks).filter(|_| overlay.is_some()) {
+            if let Some(g) = self.hint_geom(i) {
+                v.push(Spec { kind: Kind::Hint(i), title: "讀取範圍", pos: g.pos, size: (g.size.0 as u32, g.size.1 as u32), decorations: false });
+            }
+        }
         let orect = overlay.map(|o| (o.0, o.1, o.2, o.3)).unwrap_or((ox, oy, 350, 400));
+        let scale = scale * self.dialog_zoom() as f64;
         if let Some(s) = &mut self.settings {
             let size = ((s.size.x as f64 * scale) as i32, (s.size.y as f64 * scale) as i32);
             let pos = *s.pos.get_or_insert_with(|| crate::dialogs::place_near(orect, size, None));
@@ -958,6 +1307,7 @@ impl Overlay {
         let now = self.now();
         if now - self.last_top > 1.5 && self.select.is_none() {
             self.last_top = now;
+            self.check_screen();
             for (k, h) in hwnds {
                 if *k != Kind::Overlay || self.visible {
                     platform::keep_top(*h);
@@ -990,15 +1340,18 @@ impl Overlay {
             }
         }
         crate::select::step(self);
+        crate::autoframe::step(self);
         self.flush_logs();
     }
 
     pub fn window_ui(&mut self, kind: Kind, ctx: &egui::Context, hwnd: isize) {
+        sync_fonts(ctx);
         match kind {
             Kind::Overlay => self.overlay_ui(ctx, hwnd),
             Kind::Settings => crate::dialogs::settings_window(self, ctx, hwnd),
             Kind::Record => crate::dialogs::record_window(self, ctx, hwnd),
             Kind::Select => crate::select::select_window(self, ctx),
+            Kind::Hint(i) => self.hint_ui(ctx, i),
         }
     }
 
@@ -1007,8 +1360,24 @@ impl Overlay {
         self.last_tick = self.now();
         let v = self.view();
         let alpha = self.t.cfg.get("alpha").and_then(|x| x.as_f64()).unwrap_or(0.88) as f32;
+        let zoom = self.zoom();
+        if (ctx.zoom_factor() - zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(zoom);
+        }
+        let rezoom = (ctx.zoom_factor() - self.zoom_seen).abs() > 0.001;
+        self.zoom_seen = ctx.zoom_factor();
         let compact = self.t.cfg.get("compact").and_then(|x| x.as_bool()).unwrap_or(false);
         let (msg, col, plain, ocr_bad) = self.status();
+        let now = self.now();
+        if ocr_bad {
+            self.bad_since.get_or_insert(now);
+        } else {
+            self.bad_since = None;
+        }
+        if self.bad_since.map_or(false, |t| now - t >= 3.0) {
+            self.bad_hold = now + 3.0;
+        }
+        let ocr_bad = now < self.bad_hold;
 
         let mut hover: Option<&'static str> = None;
         let mut act: Option<&str> = None;
@@ -1034,24 +1403,17 @@ impl Overlay {
             egui::Frame::new()
             .fill(BG)
             .stroke(egui::Stroke::new(1.0, LINE))
+            .corner_radius(OVERLAY_RADIUS)
             .inner_margin(egui::Margin { left: 11, right: 11, top: 9, bottom: 9 })
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 2.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("●").font(font(9.0)).color(v.dot));
-                    ui.add_space(4.0);
+                    let dot_x = ui.cursor().min.x + 3.5;
+                    ui.add_space(12.0);
                     let tr = ui.label(RichText::new(&v.timer).font(mono(15.0, true)).color(INK));
-                    let _ = tr;
+                    ui.painter().circle_filled(egui::pos2(dot_x, tr.rect.center().y - ICON_DY), 3.2, v.dot);
                     ui.add_space(10.0);
-                    let btns: [(&str, &str); 6] = [
-                        ("run", if v.counting { "⏸" } else { "▶" }),
-                        ("rec", "✎"),
-                        ("set", "⚙"),
-                        ("reset", "⟲"),
-                        ("compact", "▭"),
-                        ("close", "✕"),
-                    ];
-                    for (k, txt) in btns {
+                    for k in ["run", "set", "reset", "compact", "close"] {
                         let armed = k == "reset" && self.t.reset_armed > 0.0;
                         let id = ui.next_auto_id();
                         let hovered = ui.ctx().read_response(id).map_or(false, |r| r.hovered());
@@ -1062,11 +1424,19 @@ impl Overlay {
                         } else {
                             MUTED
                         };
-                        ui.add_space(6.0);
-                        let r = ui.add(egui::Label::new(RichText::new(txt).font(btn_font(12.0)).color(c)).sense(Sense::click()));
-                        ui.add_space(6.0);
-                        if r.hovered() {
-                            hover = BTN_HINTS.iter().find(|h| h.0 == k).map(|h| h.1);
+                        ui.add_space(3.0);
+                        let (r, painter) = ui.allocate_painter(egui::vec2(ICON_BOX, ICON_BOX), Sense::click());
+                        let up = r.rect.translate(egui::vec2(0.0, -ICON_DY));
+                        draw_icon(&painter.with_clip_rect(r.rect.union(up)), up, k, v.counting, c);
+                        ui.add_space(3.0);
+                        let hk = if k == "compact" && compact { "normal" } else { k };
+                        let hint = btn_hints().iter().find(|h| h.0 == hk).map(|h| h.1.as_str());
+                        let (cx, cy) = platform::cursor_pos();
+                        let (wx, wy) = platform::window_pos(hwnd);
+                        let ppp = ui.ctx().pixels_per_point();
+                        let inside = r.rect.contains(egui::pos2((cx - wx) as f32 / ppp, (cy - wy) as f32 / ppp));
+                        if r.hovered() || (inside && hint.is_some() && self.hover == hint) {
+                            hover = hint;
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if r.clicked() {
@@ -1076,7 +1446,28 @@ impl Overlay {
                 });
                 if compact {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(&v.compact).font(mono(10.0, true)).color(EXP));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (i, (name, val, vc)) in v.compact.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(14.0);
+                            }
+                            let unit = i == 1;
+                            let f = |color| egui::TextFormat { font_id: mono(10.0, true), color, ..Default::default() };
+                            let mut job = egui::text::LayoutJob::default();
+                            job.append(&if unit { format!("{name} ⇄") } else { name.clone() }, 0.0, f(if unit { MP } else { MUTED }));
+                            job.append(&format!(" {val}"), 0.0, f(*vc));
+                            let r = ui.add(egui::Label::new(job).sense(if unit { Sense::click() } else { Sense::hover() }));
+                            if unit {
+                                if r.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if r.clicked() {
+                                    act = Some("unit");
+                                }
+                            }
+                        }
+                    });
                 } else {
                     ui.add_space(6.0);
                     egui::Grid::new("rows").num_columns(3).spacing([14.0, 2.0]).show(ui, |ui| {
@@ -1143,7 +1534,7 @@ impl Overlay {
         });
         let _ = (v.running, v.show_meso);
         let size = resp.response.rect.size() + egui::vec2(1.0, 1.0);
-        if (size - self.size).length() > 0.5 {
+        if rezoom || (size - self.size).length() > 0.5 {
             self.size = size;
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         }
@@ -1155,7 +1546,6 @@ impl Overlay {
         }
         match act {
             Some("run") => self.t.toggle_run(0.0),
-            Some("rec") => self.open_record(),
             Some("set") => self.open_settings(),
             Some("reset") => self.t.ask_reset(),
             Some("compact") => {

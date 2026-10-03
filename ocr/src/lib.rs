@@ -1,5 +1,8 @@
 #[cfg(windows)]
 pub mod capture;
+#[cfg(target_os = "macos")]
+#[path = "capture_mac.rs"]
+pub mod capture;
 pub mod det;
 pub mod img;
 

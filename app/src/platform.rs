@@ -3,7 +3,6 @@ use std::sync::mpsc::Sender;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Hotkey {
     Pause,
-    Record,
     Toggle,
 }
 
@@ -20,6 +19,8 @@ mod win {
     use windows_sys::Win32::UI::Input::Ime::ImmAssociateContextEx;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    pub const HOTKEY_NAMES: [&str; 2] = ["Ctrl+F10", "Ctrl+F12"];
 
     pub fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -101,7 +102,7 @@ mod win {
 
     pub fn hotkeys(tx: Sender<Hotkey>, failed: Sender<Vec<&'static str>>, wake: impl Fn() + Send + 'static) {
         std::thread::spawn(move || unsafe {
-            let keys = [(1, VK_F10, Hotkey::Pause, "Ctrl+F10"), (2, VK_F11, Hotkey::Record, "Ctrl+F11"), (3, VK_F12, Hotkey::Toggle, "Ctrl+F12")];
+            let keys = [(1, VK_F10, Hotkey::Pause, "Ctrl+F10"), (3, VK_F12, Hotkey::Toggle, "Ctrl+F12")];
             let mut bad = vec![];
             for (id, vk, _, name) in keys {
                 if RegisterHotKey(std::ptr::null_mut(), id, MOD_CONTROL | MOD_NOREPEAT, vk as u32) == 0 {
@@ -146,6 +147,36 @@ mod win {
             let ex = GetWindowLongW(h, GWL_EXSTYLE);
             SetWindowLongW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED as i32);
             SetLayeredWindowAttributes(h, 0, a, LWA_ALPHA);
+        }
+    }
+
+    pub fn round_corners(hwnd: isize, w: u32, h: u32, radius: f32, scale: f64) {
+        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        let d = (2.0 * radius as f64 * scale).round() as i32;
+        unsafe {
+            let rgn = CreateRoundRectRgn(0, 0, w as i32 + 1, h as i32 + 1, d, d);
+            if !rgn.is_null() {
+                SetWindowRgn(hwnd as HWND, rgn, 1);
+            }
+        }
+    }
+
+    pub fn hint_window(hwnd: isize, frame: (i32, i32, i32, i32), hole: (i32, i32, i32, i32), tab: (i32, i32, i32, i32), radius: i32) {
+        use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF, RGN_OR};
+        let round = |r: (i32, i32, i32, i32), rad: i32| unsafe { CreateRoundRectRgn(r.0, r.1, r.0 + r.2 + 1, r.1 + r.3 + 1, 2 * rad, 2 * rad) };
+        let bw = hole.0 - frame.0;
+        unsafe {
+            let h = hwnd as HWND;
+            let ex = GetWindowLongW(h, GWL_EXSTYLE);
+            SetWindowLongW(h, GWL_EXSTYLE, ex | (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as i32);
+            SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+            SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE);
+            let (rgn, cut, t) = (round(frame, radius), round(hole, (radius - bw).max(0)), round(tab, radius));
+            CombineRgn(rgn, rgn, cut, RGN_DIFF);
+            CombineRgn(rgn, rgn, t, RGN_OR);
+            DeleteObject(cut);
+            DeleteObject(t);
+            SetWindowRgn(h, rgn, 1);
         }
     }
 
@@ -240,6 +271,35 @@ mod win {
         unsafe { !MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONULL).is_null() }
     }
 
+    pub fn screen_tag(x: i32, y: i32) -> String {
+        use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+        unsafe {
+            let m = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if !m.is_null() && GetMonitorInfoW(m, &mut mi) != 0 {
+                let r = mi.rcMonitor;
+                return format!("{},{},{}x{}", r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
+        }
+        let (l, t, w, h) = primary_screen();
+        format!("{l},{t},{w}x{h}")
+    }
+
+    pub fn monitor_of(hwnd: isize) -> (i32, i32, i32, i32) {
+        use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+        unsafe {
+            let m = MonitorFromWindow(hwnd as HWND, MONITOR_DEFAULTTONEAREST);
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if !m.is_null() && GetMonitorInfoW(m, &mut mi) != 0 {
+                let r = mi.rcMonitor;
+                return (r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
+        }
+        virtual_screen()
+    }
+
     pub fn virtual_screen() -> (i32, i32, i32, i32) {
         unsafe {
             (
@@ -265,10 +325,17 @@ mod win {
 #[cfg(windows)]
 pub use win::*;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+#[path = "platform_mac.rs"]
+mod mac;
+#[cfg(target_os = "macos")]
+pub use mac::*;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod other {
     use super::*;
     pub struct InstanceGuard;
+    pub const HOTKEY_NAMES: [&str; 2] = ["Ctrl+F10", "Ctrl+F12"];
     pub fn single_instance() -> Instance {
         Instance::Only(InstanceGuard)
     }
@@ -279,6 +346,8 @@ mod other {
     }
     pub fn no_activate(_hwnd: isize) {}
     pub fn set_alpha(_hwnd: isize, _alpha: f32) {}
+    pub fn round_corners(_hwnd: isize, _w: u32, _h: u32, _radius: f32, _scale: f64) {}
+    pub fn hint_window(_hwnd: isize, _frame: (i32, i32, i32, i32), _hole: (i32, i32, i32, i32), _tab: (i32, i32, i32, i32), _radius: i32) {}
     pub fn dpi_aware() {}
     pub fn dll_dir(_dir: &std::path::Path) {}
     pub fn keep_top(_hwnd: isize) {}
@@ -302,6 +371,12 @@ mod other {
     pub fn on_screen(_x: i32, _y: i32) -> bool {
         true
     }
+    pub fn monitor_of(_hwnd: isize) -> (i32, i32, i32, i32) {
+        virtual_screen()
+    }
+    pub fn screen_tag(_x: i32, _y: i32) -> String {
+        "0,0,1920x1080".into()
+    }
     pub fn virtual_screen() -> (i32, i32, i32, i32) {
         (0, 0, 1920, 1080)
     }
@@ -311,5 +386,5 @@ mod other {
     pub fn below_normal_priority() {}
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use other::*;

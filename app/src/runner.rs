@@ -17,6 +17,7 @@ pub enum Kind {
     Settings,
     Record,
     Select,
+    Hint(u8),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +44,14 @@ struct Win {
     repaint_at: Option<Instant>,
     shown: bool,
     last_size: PhysicalSize<u32>,
+    at: ((i32, i32), (u32, u32)),
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Win {
+    fn drop(&mut self) {
+        platform::restore_class(self.hwnd);
+    }
 }
 
 pub struct Runner {
@@ -55,7 +64,15 @@ pub struct Runner {
 }
 
 pub fn run(make: impl FnOnce(EventLoopProxy<UserEvent>) -> Overlay) -> Result<(), String> {
-    let el = EventLoop::<UserEvent>::with_user_event().build().map_err(|e| e.to_string())?;
+    #[allow(unused_mut)]
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_activate_ignoring_other_apps(false);
+        builder.with_activation_policy(winit::platform::macos::ActivationPolicy::Accessory);
+    }
+    let el = builder.build().map_err(|e| e.to_string())?;
     el.set_control_flow(ControlFlow::Wait);
     let proxy = el.create_proxy();
     let app = make(proxy.clone());
@@ -81,11 +98,12 @@ impl Runner {
         #[cfg(windows)]
         {
             use winit::platform::windows::WindowAttributesExtWindows;
+            attr = attr.with_drag_and_drop(false);
             if !s.decorations {
                 attr = attr.with_skip_taskbar(true);
             }
         }
-        if s.kind == Kind::Overlay {
+        if matches!(s.kind, Kind::Overlay | Kind::Hint(_)) {
             attr = attr.with_active(false);
         }
         let window = match el.create_window(attr) {
@@ -95,6 +113,10 @@ impl Runner {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        if s.decorations {
+            window.set_outer_position(PhysicalPosition::new(s.pos.0, s.pos.1));
+        }
         if self.sb.is_none() {
             self.sb = softbuffer::Context::new(window.clone()).ok();
         }
@@ -111,6 +133,17 @@ impl Runner {
         if s.kind == Kind::Overlay {
             platform::no_activate(hwnd);
         }
+        if let Kind::Hint(i) = s.kind {
+            if let Some(g) = self.app.hint_geom(i) {
+                platform::hint_window(hwnd, g.frame, g.hole, g.tab, g.radius);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        match s.kind {
+            Kind::Select => platform::cover_screen(hwnd),
+            Kind::Settings | Kind::Record => platform::key_panel(hwnd),
+            Kind::Overlay | Kind::Hint(_) => {}
+        }
         let id = window.id();
         self.wins.insert(
             id,
@@ -125,6 +158,7 @@ impl Runner {
                 repaint_at: Some(Instant::now()),
                 shown: false,
                 last_size: PhysicalSize::new(0, 0),
+                at: (s.pos, s.size),
             },
         );
     }
@@ -138,13 +172,22 @@ impl Runner {
         });
         self.overlay_rect = overlay_rect.map(|(x, y, w, h, _)| (x, y, w, h));
         let wanted = self.app.wanted(overlay_rect);
-        let gone: Vec<WindowId> = self.wins.iter().filter(|(_, w)| !wanted.iter().any(|s| s.kind == w.kind)).map(|(id, _)| *id).collect();
+        let same = |s: &Spec, w: &Win| s.kind == w.kind && (!matches!(s.kind, Kind::Hint(_)) || (s.pos, s.size) == w.at);
+        let gone: Vec<WindowId> = self.wins.iter().filter(|(_, w)| !wanted.iter().any(|s| same(s, w))).map(|(id, _)| *id).collect();
+        #[cfg(target_os = "macos")]
+        let dialog = |k: Kind| matches!(k, Kind::Settings | Kind::Record | Kind::Select);
+        #[cfg(target_os = "macos")]
+        let closed = gone.iter().any(|id| dialog(self.wins[id].kind));
         for id in gone {
             if let Some(w) = self.wins.remove(&id) {
                 if w.kind == Kind::Record {
                     self.app.record_closed();
                 }
             }
+        }
+        #[cfg(target_os = "macos")]
+        if closed && !self.wins.values().any(|w| dialog(w.kind)) {
+            platform::restore_focus();
         }
         for s in wanted {
             if self.find(s.kind).is_none() {
@@ -173,10 +216,16 @@ impl Runner {
         let out = w.ctx.run(raw, |ctx| app.window_ui(kind, ctx, hwnd));
         w.state.handle_platform_output(&w.window, out.platform_output);
         let mut repaint = None;
+        #[cfg(target_os = "macos")]
+        let top_left = platform::window_pos(hwnd);
         for (_vid, vout) in out.viewport_output {
             let mut info = egui::ViewportInfo::default();
             egui_winit::process_viewport_commands(&w.ctx, &mut info, vout.commands, &w.window, &mut Default::default());
             repaint = Some(vout.repaint_delay);
+        }
+        #[cfg(target_os = "macos")]
+        if platform::window_pos(hwnd) != top_left {
+            platform::move_quiet(hwnd, top_left.0, top_left.1);
         }
         if matches!(kind, Kind::Settings | Kind::Record) {
             let sz = w.window.outer_size();
@@ -199,6 +248,13 @@ impl Runner {
                 }
             }
         }
+        if kind == Kind::Overlay {
+            let sz = w.window.outer_size();
+            if sz != w.last_size {
+                w.last_size = sz;
+                platform::round_corners(hwnd, sz.width, sz.height, crate::ui::OVERLAY_RADIUS as f32, w.window.scale_factor() * w.ctx.zoom_factor() as f64);
+            }
+        }
         let ppp = out.pixels_per_point;
         let prims = w.ctx.tessellate(out.shapes, ppp);
         let size = w.window.inner_size();
@@ -213,7 +269,10 @@ impl Runner {
                 }
             }
         }
-        if !w.shown && kind != Kind::Overlay {
+        if !w.shown && matches!(kind, Kind::Hint(_)) {
+            platform::show_quiet(hwnd, true);
+            w.shown = true;
+        } else if !w.shown && kind != Kind::Overlay {
             w.window.set_visible(true);
             w.shown = true;
             platform::force_focus(hwnd);
@@ -245,6 +304,10 @@ fn hwnd_of(w: &Window) -> isize {
         if let RawWindowHandle::Win32(h) = h.as_raw() {
             return h.hwnd.get();
         }
+        #[cfg(target_os = "macos")]
+        if let RawWindowHandle::AppKit(h) = h.as_raw() {
+            return h.ns_view.as_ptr() as isize;
+        }
     }
     0
 }
@@ -253,6 +316,19 @@ impl ApplicationHandler<UserEvent> for Runner {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.reconcile(el);
         self.redraw_all();
+    }
+
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if !self.app.quit {
+            self.app.quit();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            unsafe extern "C" {
+                fn _exit(code: i32) -> !;
+            }
+            unsafe { _exit(0) }
+        }
     }
 
     fn new_events(&mut self, el: &ActiveEventLoop, cause: StartCause) {
