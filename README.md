@@ -8,7 +8,7 @@
 
 ## 使用
 Windows：
-1. Releases 下載 zip，解壓後開 ExpOverlay.exe
+1. Releases 下載 artale-exp-overlay_v1.4_win.zip，解壓後開 ExpOverlay.exe
 2. 把藥水放到右下快捷欄、打開背包切到消耗欄，按 ≡ 填藥水名稱和單價，按「自動框選」
 3. 按 ▶ 開始
 
@@ -16,7 +16,7 @@ Ctrl+F10 開始/暫停　Ctrl+F12 顯示/隱藏
 
 建議可以視窗化長按win+↑ 開著背包不擋視線
 
-Mac：Releases 下載「經驗收益計算器-Mac」zip，解壓後照裡面的「Mac版使用說明」打開
+Mac：Releases 下載 artale-exp-overlay_v1.4_mac.zip，解壓後照裡面的「Mac版使用說明」打開
 
 （第一次要在系統設定允許打開和螢幕錄製）
 
