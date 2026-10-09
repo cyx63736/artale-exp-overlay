@@ -1,10 +1,19 @@
+pub mod exp_table;
 pub mod util;
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use util::*;
 
-pub const KS: [&str; 2] = ["hp", "mp"];
+pub const NP: usize = 8;
+pub const KS: [&str; NP] = ["hp", "mp", "p3", "p4", "p5", "p6", "p7", "p8"];
+
+pub fn two<T: Default>(a: T, b: T) -> [T; NP] {
+    let mut r: [T; NP] = Default::default();
+    r[0] = a;
+    r[1] = b;
+    r
+}
 pub const RESUME_HOURS: f64 = 2.0;
 
 pub fn default_cfg() -> Map<String, Value> {
@@ -31,38 +40,30 @@ fn truthy(v: Option<&Value>) -> bool {
 
 pub type Slots = (Option<i64>, i64);
 
+pub enum Hide {
+    No,
+    Fill(i64, Vec<i64>),
+    Hold,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drop {
     pub miss: i64,
     pub t: f64,
     pub n: i64,
-    pub credit: Option<i64>,
-    pub slots: Option<Option<Slots>>,
-}
-
-impl Drop {
-    fn len(&self) -> usize {
-        if self.slots.is_some() {
-            5
-        } else if self.credit.is_some() {
-            4
-        } else {
-            3
-        }
-    }
 }
 
 #[derive(Default, Clone, Debug)]
 pub struct OcrOut {
     pub exp: Option<String>,
     pub exp_err: Option<String>,
-    pub qs: [Option<String>; 2],
-    pub qs_err: [Option<String>; 2],
-    pub inv: Option<[Option<Vec<Option<i64>>>; 2]>,
+    pub qs: [Option<String>; NP],
+    pub qs_err: [Option<String>; NP],
+    pub inv: Option<[Option<Vec<Option<i64>>>; NP]>,
     pub meso: Option<String>,
     pub meso_box_only: bool,
     pub bag_id: i64,
-    pub qs_sig: [Option<Vec<f32>>; 2],
+    pub qs_sig: [Option<Vec<f32>>; NP],
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,6 +80,7 @@ pub struct Stats {
     pub profit: Option<f64>,
     pub income_hr: Option<f64>,
     pub profit_hr: Option<f64>,
+    pub sold: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,14 +96,16 @@ pub enum Saved {
     Failed,
 }
 
-pub type Snap = (f64, i64, i64, i64, Option<i64>);
+pub type Snap = (f64, i64, i64, i64, Option<i64>, [i64; NP]);
+pub type CurvePt = (f64, i64, i64, i64, Option<i64>, f64, i64);
+pub const CURVE_FILE: &str = "練功曲線.jsonl";
 
 pub struct Tracker {
     pub cfg: Map<String, Value>,
     pub fake_now: Option<f64>,
     pub logs: Vec<String>,
     pub ui: Vec<Ui>,
-    pub tpl_exists: [bool; 2],
+    pub tpl_exists: [bool; NP],
     pub state_path: Option<std::path::PathBuf>,
     pub log_path: Option<std::path::PathBuf>,
 
@@ -116,38 +120,52 @@ pub struct Tracker {
     pub exp_last: Option<(i64, Option<f64>)>,
     pub need: Option<f64>,
     pub pend_first: Option<(i64, Option<f64>)>,
-    pub qs: [Option<i64>; 2],
-    pub qs_pend: [Option<(i64, u32)>; 2],
-    pub qs_t: [f64; 2],
-    pub qs_seen: [f64; 2],
-    pub qs_credit: [i64; 2],
-    pub qs_rise: [Option<(i64, f64)>; 2],
-    pub qs_fell: [bool; 2],
-    pub qs_ok: [bool; 2],
-    pub qs_unv: [(i64, i64); 2],
-    pub qs_bad: [(u32, i64); 2],
-    pub qs_far_t: [f64; 2],
-    pub qs_far_last: [f64; 2],
-    pub qs_fixing: [bool; 2],
+    pub qs: [Option<i64>; NP],
+    pub qs_pend: [Option<(i64, u32)>; NP],
+    pub qs_t: [f64; NP],
+    pub qs_seen: [f64; NP],
+    pub qs_credit: [i64; NP],
+    pub qs_rise: [Option<(i64, f64)>; NP],
+    pub qs_fell: [bool; NP],
+    pub qs_ok: [bool; NP],
+    pub qs_switched: [bool; NP],
+    pub qs_blind_t: [f64; NP],
+    pub qs_flat: [(u32, f64); NP],
+    pub qs_flat_said: [f64; NP],
+    pub qs_wrong: [Option<(i64, f64)>; NP],
+    pub drift_from: [(f64, i64); NP],
+    pub qs_bad: [(u32, i64); NP],
+    pub qs_far_t: [f64; NP],
+    pub qs_far_last: [f64; NP],
+    pub qs_fixing: [bool; NP],
     pub fill_from: f64,
-    pub qs_all: [i64; 2],
-    pub qs_add: [i64; 2],
-    pub total: [Option<(i64, i64, i64, f64)>; 2],
-    pub inv_pend: [Option<(i64, i64, u32)>; 2],
-    pub inv_slots: [Option<i64>; 2],
-    pub inv_hide: [Option<f64>; 2],
-    pub total_act: [f64; 2],
-    pub last_rise: [Option<(i64, i64, f64, i64, i64)>; 2],
-    pub cap_since: [Option<f64>; 2],
+    pub qs_all: [i64; NP],
+    pub qs_add: [i64; NP],
+    pub total: [Option<(i64, i64, i64, f64)>; NP],
+    pub anchor_used: [i64; NP],
+    pub anchor_cells: [Vec<i64>; NP],
+    pub seg_base: [Option<(i64, i64)>; NP],
+    pub seg_buy: [i64; NP],
+    pub seg_check_t: [f64; NP],
+    pub inv_pend: [Option<(i64, i64, u32)>; NP],
+    pub inv_slots: [Option<i64>; NP],
+    pub inv_hide: [Option<f64>; NP],
+    pub both_drop: bool,
+    pub hint_pot: bool,
+    pub inv_cells: [Vec<i64>; NP],
+    pub total_act: [f64; NP],
+    pub last_rise: [Option<(i64, i64, f64, i64, i64)>; NP],
+    pub cap_since: [Option<f64>; NP],
     pub meso: Option<i64>,
     pub meso_pend: Option<(i64, u32, BTreeSet<i64>)>,
     pub meso_drop: Option<(i64, i64, f64)>,
     pub meso_rej: Option<i64>,
+    pub meso_cand: Option<(i64, u32, f64)>,
     pub meso_t: f64,
-    pub qs_sus: [i64; 2],
+    pub qs_sus: [i64; NP],
     pub exp_ok_t: f64,
     pub qs_lost: (Option<f64>, bool),
-    pub qs_prev_raw: [Option<i64>; 2],
+    pub qs_prev_raw: [Option<i64>; NP],
     pub exp_move_t: f64,
     pub auto_paused: bool,
     pub acc: f64,
@@ -157,25 +175,29 @@ pub struct Tracker {
     pub hist: Vec<(f64, i64)>,
     pub levelups: i64,
     pub deaths: i64,
-    pub qs_used: [i64; 2],
-    pub bag_used: [i64; 2],
+    pub qs_used: [i64; NP],
+    pub bag_used: [i64; NP],
     pub meso_anchor: Option<(i64, f64, Option<f64>)>,
     pub inc_done: Option<(i64, f64)>,
     pub seg_pending: bool,
+    pub sold: i64,
+    pub pause_up: Option<(i64, i64)>,
+    pub sale_ask: Option<i64>,
     pub pend_dec: Option<(i64, Option<f64>)>,
     pub reject_n: u32,
     pub pre_inc: Option<(i64, usize, f64)>,
     pub rej_run: Option<(i64, i64, u32)>,
     pub series: Vec<Snap>,
-    pub qs_sus_cnt: [i64; 2],
-    pub last_drop: [Option<Drop>; 2],
-    pub recon_acc: [i64; 2],
-    pub recon_add: [i64; 2],
-    pub recon_t: [Option<f64>; 2],
+    pub curve: Vec<CurvePt>,
+    pub qs_sus_cnt: [i64; NP],
+    pub last_drop: [Option<Drop>; NP],
+    pub recon_acc: [i64; NP],
+    pub recon_add: [i64; NP],
     pub seg_t: f64,
-    pub cost_prev: [f64; 2],
-    pub used_mark: [i64; 2],
-    pub prev_price: [Option<f64>; 2],
+    pub cost_prev: [f64; NP],
+    pub used_mark: [i64; NP],
+    pub prev_price: [Option<f64>; NP],
+    pub pot_names: [Vec<String>; NP],
     pub session_no: u32,
 }
 
@@ -183,9 +205,10 @@ pub fn sys_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-const SESSION_KEYS: [&str; 17] = [
+const SESSION_KEYS: [&str; 23] = [
     "gain", "hist", "levelups", "deaths", "qs_used", "bag_used", "meso_anchor", "series", "qs_sus_cnt", "last_drop", "inc_done",
-    "seg_pending", "recon_acc", "recon_add", "cost_prev", "used_mark", "prev_price",
+    "seg_pending", "recon_acc", "recon_add", "cost_prev", "used_mark", "prev_price", "anchor_used", "curve", "sold", "pause_up",
+    "sale_ask", "pot_names",
 ];
 const KEEP_KEYS: [&str; 10] = ["need", "qs_all", "qs_add", "total", "total_act", "inv_slots", "last_rise", "meso", "meso_t", "qs_sus"];
 
@@ -197,7 +220,7 @@ impl Tracker {
             fake_now,
             logs: vec![],
             ui: vec![],
-            tpl_exists: [false; 2],
+            tpl_exists: [false; NP],
             state_path: None,
             log_path: None,
             alert: None,
@@ -211,38 +234,52 @@ impl Tracker {
             exp_last: None,
             need: None,
             pend_first: None,
-            qs: [None; 2],
-            qs_pend: [None; 2],
-            qs_t: [0.0; 2],
-            qs_seen: [0.0; 2],
-            qs_credit: [0; 2],
-            qs_rise: [None; 2],
-            qs_fell: [false; 2],
-            qs_ok: [false; 2],
-            qs_unv: [(0, 0); 2],
-            qs_bad: [(0, -1); 2],
-            qs_far_t: [f64::MIN; 2],
-            qs_far_last: [f64::MIN; 2],
-            qs_fixing: [false; 2],
+            qs: [None; NP],
+            qs_pend: [None; NP],
+            qs_t: [0.0; NP],
+            qs_seen: [0.0; NP],
+            qs_credit: [0; NP],
+            qs_rise: [None; NP],
+            qs_fell: [false; NP],
+            qs_ok: [false; NP],
+            qs_switched: [false; NP],
+            qs_blind_t: [now; NP],
+            qs_flat: [(0, f64::MIN); NP],
+            qs_flat_said: [f64::MIN; NP],
+            qs_wrong: [None; NP],
+            drift_from: [(now, 0); NP],
+            qs_bad: [(0, -1); NP],
+            qs_far_t: [f64::MIN; NP],
+            qs_far_last: [f64::MIN; NP],
+            qs_fixing: [false; NP],
             fill_from: now,
-            qs_all: [0; 2],
-            qs_add: [0; 2],
-            total: [None; 2],
-            inv_pend: [None; 2],
-            inv_slots: [None; 2],
-            inv_hide: [None; 2],
-            total_act: [0.0; 2],
-            last_rise: [None; 2],
-            cap_since: [None; 2],
+            qs_all: [0; NP],
+            qs_add: [0; NP],
+            total: [None; NP],
+            anchor_used: [0; NP],
+            anchor_cells: Default::default(),
+            seg_base: [None; NP],
+            seg_buy: [0; NP],
+            seg_check_t: [f64::MIN; NP],
+            inv_pend: [None; NP],
+            inv_slots: [None; NP],
+            inv_hide: [None; NP],
+            both_drop: false,
+            hint_pot: false,
+            inv_cells: Default::default(),
+            total_act: [0.0; NP],
+            last_rise: [None; NP],
+            cap_since: [None; NP],
             meso: None,
             meso_pend: None,
             meso_drop: None,
             meso_rej: None,
+            meso_cand: None,
             meso_t: 0.0,
-            qs_sus: [0; 2],
+            qs_sus: [0; NP],
             exp_ok_t: 0.0,
             qs_lost: (None, false),
-            qs_prev_raw: [None; 2],
+            qs_prev_raw: [None; NP],
             exp_move_t: now,
             auto_paused: false,
             acc: 0.0,
@@ -252,25 +289,29 @@ impl Tracker {
             hist: vec![],
             levelups: 0,
             deaths: 0,
-            qs_used: [0; 2],
-            bag_used: [0; 2],
+            qs_used: [0; NP],
+            bag_used: [0; NP],
             meso_anchor: None,
             inc_done: None,
+            sold: 0,
+            pause_up: None,
+            sale_ask: None,
             seg_pending: false,
             pend_dec: None,
             reject_n: 0,
             pre_inc: None,
             rej_run: None,
             series: vec![],
-            qs_sus_cnt: [0; 2],
-            last_drop: [None, None],
-            recon_acc: [0; 2],
-            recon_add: [0; 2],
-            recon_t: [None; 2],
+            curve: vec![],
+            qs_sus_cnt: [0; NP],
+            last_drop: Default::default(),
+            recon_acc: [0; NP],
+            recon_add: [0; NP],
             seg_t: now,
-            cost_prev: [0.0; 2],
-            used_mark: [0; 2],
-            prev_price: [None; 2],
+            cost_prev: [0.0; NP],
+            used_mark: [0; NP],
+            prev_price: [None; NP],
+            pot_names: Default::default(),
             session_no: 0,
         };
         t.new_session();
@@ -314,6 +355,23 @@ impl Tracker {
         let before = (to.min(m) - from).max(0) as f64;
         after * self.price(k) + before * self.prev_price[k].unwrap_or(self.price(k))
     }
+    pub fn pot_label(&self, k: usize) -> String {
+        let mut v = self.pot_names[k].clone();
+        let cur = self.name(k);
+        if !cur.is_empty() && v.last() != Some(&cur) {
+            v.push(cur);
+        }
+        v.join("→")
+    }
+    pub fn ks(&self) -> Vec<usize> {
+        (0..NP).filter(|&k| k < 2 || !self.name(k).is_empty()).collect()
+    }
+    pub fn extra_label(&self) -> String {
+        (2..NP).filter(|&k| !self.name(k).is_empty() || self.used(k) > 0).map(|k| format!("{} {}", self.pot_label(k), self.used(k))).collect::<Vec<_>>().join("、")
+    }
+    pub fn cost_all(&self) -> f64 {
+        (0..NP).map(|k| self.cost_of(k)).sum()
+    }
     pub fn price(&self, k: usize) -> f64 {
         self.cfg.get(&format!("{}_price", KS[k])).and_then(|v| v.as_f64()).unwrap_or(0.0)
     }
@@ -329,35 +387,52 @@ impl Tracker {
         self.hist = vec![];
         self.levelups = 0;
         self.deaths = 0;
-        self.qs_used = [0; 2];
-        self.bag_used = [0; 2];
+        self.qs_used = [0; NP];
+        self.bag_used = [0; NP];
         self.meso_anchor = None;
         self.inc_done = None;
         self.seg_pending = false;
+        self.sold = 0;
+        self.pause_up = None;
+        self.sale_ask = None;
         self.meso_drop = None;
         self.pend_dec = None;
         self.reject_n = 0;
         self.pre_inc = None;
         self.rej_run = None;
-        self.cap_since = [None; 2];
+        self.cap_since = [None; NP];
         self.series = vec![];
-        self.qs_sus_cnt = [0; 2];
-        for u in &mut self.qs_unv {
-            u.1 = 0;
-        }
-        self.last_drop = [None, None];
-        self.recon_acc = [0; 2];
-        self.recon_add = [0; 2];
-        self.recon_t = [None; 2];
+        self.curve = vec![];
+        self.qs_sus_cnt = [0; NP];
+        self.last_drop = Default::default();
+        self.recon_acc = [0; NP];
+        self.recon_add = [0; NP];
+        self.anchor_used = [0; NP];
+        self.seg_base = [None; NP];
+        self.seg_buy = [0; NP];
         self.seg_t = self.now();
-        self.cost_prev = [0.0; 2];
-        self.used_mark = [0; 2];
-        self.prev_price = [None; 2];
+        self.cost_prev = [0.0; NP];
+        self.used_mark = [0; NP];
+        self.prev_price = [None; NP];
+        self.pot_names = Default::default();
         self.session_no += 1;
     }
 
     pub fn snapshot(&self, a: f64) -> Snap {
-        (a, self.gain, self.used(0), self.used(1), self.income())
+        (a, self.gain, self.used(0), self.used(1), self.income(), std::array::from_fn(|k| self.used(k)))
+    }
+
+    pub fn curve_pt(&self, a: f64) -> CurvePt {
+        (a, self.gain, self.used(0), self.used(1), self.income(), self.cost_all(), self.sold)
+    }
+
+    pub fn curve_now(&self) -> Vec<CurvePt> {
+        let a = self.active();
+        let mut v = self.curve.clone();
+        if v.last().map_or(true, |l| a - l.0 >= 1.0) {
+            v.push(self.curve_pt(a));
+        }
+        v
     }
 
     pub fn recent(&self, a: f64, span: f64) -> (Snap, Option<Snap>, f64) {
@@ -395,10 +470,9 @@ impl Tracker {
         Some((t - (self.qs_all[k] - q) + (self.qs_add[k] - a)).max(0))
     }
     pub fn inv_ready(&self, k: Option<usize>) -> bool {
-        let ks: &[usize] = match k {
-            Some(0) => &[0],
-            Some(_) => &[1],
-            None => &[0, 1],
+        let ks = match k {
+            Some(k) => vec![k],
+            None => self.ks(),
         };
         self.has("inv_region") && ks.iter().any(|&x| self.tpl_exists[x])
     }
@@ -413,8 +487,28 @@ impl Tracker {
             if let Some(m) = self.meso {
                 if self.now() - self.meso_t < 5.0 {
                     self.meso_anchor = Some((m, self.active(), Some(self.meso_t)));
+                    self.ask_sale();
                 }
             }
+        }
+    }
+
+    fn ask_sale(&mut self) {
+        if let Some((_, up)) = self.pause_up.take() {
+            if up > 0 {
+                *self.sale_ask.get_or_insert(0) += up;
+                self.log(format!("暫停期間楓幣多了 {}，問是不是賣掉落物", comma(up)));
+            }
+        }
+    }
+
+    pub fn answer_sale(&mut self, yes: bool) {
+        let Some(v) = self.sale_ask.take() else { return };
+        if yes {
+            self.sold += v;
+            self.log(format!("賣掉落物 {}，算進收益", comma(v)));
+        } else {
+            self.log(format!("暫停期間多的 {} 不是賣掉落物，不算", comma(v)));
         }
     }
 
@@ -423,6 +517,7 @@ impl Tracker {
         let d = self.inc_done.unwrap_or((0, 0.0));
         self.inc_done = Some((d.0 + m - ma.0, d.1 + (act_end - ma.1).max(0.0)));
         self.meso_anchor = None;
+        self.pause_up = Some((m, 0));
     }
 
     pub fn feed_meso(&mut self, v: i64, bag_id: i64) -> &'static str {
@@ -492,11 +587,40 @@ impl Tracker {
             self.close_seg(a);
             self.log(format!("楓幣 {} 當作暫停前的結尾，暫停期間的楓幣增減不算", comma(v)));
         }
+        if self.meso_anchor.is_none() {
+            if let Some((l, up)) = self.pause_up.as_mut() {
+                *up += (v - *l).max(0);
+                *l = v;
+            }
+        }
         if self.counting() && self.meso_anchor.is_none() {
             self.meso_anchor = Some((v, self.active(), Some(self.meso_t)));
             self.log(format!("楓幣 {} 當作這次的起點", comma(v)));
+            self.ask_sale();
         }
         "ok"
+    }
+
+    fn meso_settled(&mut self, v: i64) -> bool {
+        let now = self.now();
+        let Some(l) = self.meso else { return false };
+        if digits_differ(l, v) < 2 {
+            self.meso_cand = None;
+            return false;
+        }
+        match &mut self.meso_cand {
+            Some(c) if (v - c.0).abs() as f64 <= (c.0 as f64 * 0.1).max(2_000_000.0) => {
+                c.0 = v;
+                c.1 += 1;
+            }
+            c => *c = Some((v, 1, now)),
+        }
+        let c = self.meso_cand.unwrap();
+        if c.1 >= 5 && now - c.2 >= 10.0 {
+            self.meso_cand = None;
+            return true;
+        }
+        false
     }
 
     pub fn meso_near(&self, v: i64) -> bool {
@@ -516,6 +640,16 @@ impl Tracker {
 
     pub fn income_secs(&self, a: f64) -> f64 {
         self.inc_done.map_or(0.0, |d| d.1) + self.meso_anchor.map_or(0.0, |ma| a - ma.1)
+    }
+
+    pub fn level(&self) -> Option<u32> {
+        self.need.and_then(exp_table::level_of)
+    }
+
+    fn snap_need(&mut self) {
+        if let Some(l) = self.level() {
+            self.need = exp_table::need(l).map(|n| n as f64);
+        }
     }
 
     pub fn feed_exp(&mut self, exp: i64, pct: Option<f64>, trusted: bool) -> bool {
@@ -616,12 +750,14 @@ impl Tracker {
         self.rej_run = None;
         self.pend_dec = None;
         if levelup {
-            self.need = need_est;
+            let next = self.level().and_then(|l| exp_table::need(l + 1)).map(|n| n as f64);
+            self.need = next.or(need_est);
         } else if let Some(ne) = need_est.filter(|&n| n != 0.0) {
             if pct.unwrap_or(0.0) >= 3.0 || self.need.map_or(true, |n| n == 0.0) {
                 self.need = Some(ne);
             }
         }
+        self.snap_need();
         if counting {
             self.gain += add;
             self.hist.push((now, self.gain));
@@ -645,6 +781,12 @@ impl Tracker {
             }
         };
         self.reject_n += 1;
+        if self.reject_n >= 5 && self.off_table(exp, pct, need_est) {
+            self.reject_n = 0;
+            self.rej_run = None;
+            self.pend_dec = None;
+            return false;
+        }
         if self.reject_n >= 5 {
             let last = self.exp_last.map_or("None".to_string(), |(e, p)| format!("({e}, {})", py_opt(p)));
             self.log(format!("EXP 連續 5 次對不上（{last} → {}[{}%]），重新當基準", comma(exp), py_opt(pct)));
@@ -664,6 +806,7 @@ impl Tracker {
             self.exp_last = Some((exp, pct));
             if need_est.map_or(false, |n| n != 0.0) {
                 self.need = need_est;
+                self.snap_need();
             }
             self.reject_n = 0;
             self.pend_dec = None;
@@ -671,6 +814,17 @@ impl Tracker {
             self.pre_inc = None;
         }
         false
+    }
+
+    fn off_table(&self, exp: i64, pct: Option<f64>, need_est: Option<f64>) -> bool {
+        let Some(l) = self.level() else { return false };
+        if exp_table::need(l + 1).map_or(false, |n| exp > n) {
+            return true;
+        }
+        match (need_est.filter(|&n| n != 0.0), pct) {
+            (Some(ne), Some(p)) if p >= 3.0 => exp_table::level_of(ne).map_or(true, |nl| nl < l),
+            _ => false,
+        }
     }
 
     fn qs_use(&mut self, k: usize, n: i64, sus: bool) {
@@ -684,15 +838,11 @@ impl Tracker {
         let sus = sus || n >= 20;
         if sus {
             self.qs_sus[k] += n;
-        } else if !self.qs_ok[k] {
-            self.qs_unv[k].0 += n;
         }
         if self.counting() {
             self.qs_used[k] += n;
             if sus {
                 self.qs_sus_cnt[k] += n;
-            } else if !self.qs_ok[k] {
-                self.qs_unv[k].1 += n;
             }
         }
     }
@@ -714,12 +864,23 @@ impl Tracker {
 
     pub fn feed_qs(&mut self, k: usize, val: i64) {
         let (last, now) = (self.qs[k], self.now());
+        if self.qs_wrong[k].map_or(false, |(w, t)| w == val && now - t < 600.0) {
+            return;
+        }
         let gap = now - self.qs_seen[k];
         self.qs_seen[k] = now;
+        if gap > self.blind_sec() {
+            self.qs_blind_t[k] = now;
+        }
         let step = (15f64).max((now - self.qs_t[k]) / 60.0 * 90.0);
         let mut val = val;
         let sure = self.qs_fell[k] || self.qs_ok[k];
-        match last.filter(|&l| sure && val > l && l as f64 > step).and_then(|l| drop_one_digit(val, l, step)) {
+        let in_bag = |x: i64| self.inv_cells[k].iter().any(|&c| (c - x).abs() <= 2);
+        let fix = last.filter(|&l| val > l).and_then(|l| drop_one_digit(val, l, step)).filter(|&c| {
+            let l = last.unwrap();
+            (sure && l as f64 > step) || (self.qs_fell[k] && !in_bag(val) && in_bag(c))
+        });
+        match fix {
             Some(c) => {
                 if !self.qs_fixing[k] {
                     self.qs_fixing[k] = true;
@@ -781,6 +942,7 @@ impl Tracker {
                 self.qs_rise[k] = None;
                 self.qs_fell[k] = true;
                 self.qs_ok[k] = false;
+                self.qs_switched[k] = true;
                 self.log(format!("{name} 快捷欄 {last} → {val}（這格用完換下一格，算用掉 {n}）"));
             } else {
                 self.qs_fell[k] = false;
@@ -802,6 +964,7 @@ impl Tracker {
             self.qs_rise[k] = None;
             self.qs_fell[k] = false;
             self.qs_ok[k] = false;
+            self.qs_switched[k] = true;
             self.log(format!("{name} 快捷欄 {last} → {val}（一下子少太多，當成換格顯示，不算用量）"));
         }
         self.qs[k] = Some(val);
@@ -814,7 +977,8 @@ impl Tracker {
         if !self.region(k) || self.now() - self.qs_seen[k] > self.blind_sec() {
             return;
         }
-        let Some(v) = self.qs[k] else { return };
+        let wrong = raw.filter(|&r| self.qs_wrong[k].map_or(false, |w| w.0 == r));
+        let Some(v) = wrong.or(self.qs[k]) else { return };
         let cells: Vec<i64> = stacks.iter().flatten().copied().collect();
         if cells.is_empty() || cells.len() != stacks.len() {
             return;
@@ -823,21 +987,22 @@ impl Tracker {
         let near = |x: i64| cells.iter().any(|&c| (c - x).abs() <= 2);
         if near(v) || raw.map_or(false, near) || pend.map_or(false, near) {
             self.qs_ok[k] = true;
-            self.qs_unv[k] = (0, 0);
             self.qs_bad[k].0 = 0;
             return;
         }
         if self.qs_bad[k].1 == bag_id || self.inv_slots[k] != Some(cells.len() as i64) {
             return;
         }
+        self.qs_ok[k] = false;
         self.qs_bad[k].0 += 1;
         if self.qs_bad[k].0 < 2 {
             return;
         }
         self.qs_bad[k] = (0, bag_id);
-        let (all, cnt) = std::mem::take(&mut self.qs_unv[k]);
-        self.qs_sus[k] += all;
-        self.qs_sus_cnt[k] += cnt;
+        if let Some(t) = self.total[k] {
+            self.qs_sus[k] = self.qs_sus[k].max(self.qs_all[k] - t.1);
+            self.qs_sus_cnt[k] = self.qs_sus_cnt[k].max(self.qs_used[k] - self.anchor_used[k]);
+        }
         let name = self.name(k);
         let list = cells.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("、");
         let cap = self.cfg_f("stack_max") as i64;
@@ -874,6 +1039,7 @@ impl Tracker {
             self.say(msg.clone(), 15.0);
             self.log(msg);
         }
+        self.qs_wrong[k] = Some((v, self.now()));
         self.qs[k] = Some(c);
         self.qs_pend[k] = None;
         self.qs_rise[k] = None;
@@ -883,133 +1049,100 @@ impl Tracker {
         self.qs_ok[k] = true;
     }
 
-    fn qs_miss(&mut self, k: usize, miss: i64, now: f64, slots: Option<Slots>) -> Option<i64> {
-        let name = self.name(k);
-        let prev = self.total[k].unwrap();
-        let blind_for = now - self.qs_t[k];
-        if self.qs[k].is_some() && blind_for <= self.blind_sec() {
-            let lim = (15f64).max((self.active() - self.total_act[k]) / 60.0 * 90.0);
-            return if miss as f64 <= lim { Some(-1) } else { None };
-        }
-        if prev.3 < self.fill_from || miss as f64 > (15f64).max((now - prev.3).min(blind_for) / 60.0 * 90.0) {
-            self.last_drop[k] = Some(Drop { miss, t: now, n: 0, credit: Some(0), slots: Some(slots) });
-            self.log(format!("{name} 快捷欄讀不到時背包少了 {}，不像是喝掉的，不算用量", comma(miss)));
-            return None;
-        }
-        self.qs_credit[k] += miss;
-        self.qs_pend[k] = None;
-        let x = (self.active() - self.total_act[k]).max(0.0);
-        let n = 0.max(miss.min(pround(miss as f64 * x / (now - prev.3).max(1.0))));
-        self.bag_used[k] += n;
-        self.last_drop[k] = Some(Drop { miss, t: now, n, credit: Some(miss), slots: Some(slots) });
-        if n != 0 {
-            self.log(format!("{name} 快捷欄讀不到的這段時間用掉 {} 瓶（用背包的數字補算）", comma(n)));
-        }
-        Some(n)
-    }
-
-    fn reconcile(&mut self, k: usize, miss: i64, now: f64, slots: Option<Slots>) {
-        let name = self.name(k);
-        let mut acc = self.recon_acc[k];
-        if miss > 0 {
-            if self.total[k].map_or(false, |t| t.3 >= self.seg_t) {
-                acc += miss;
-            }
-        } else if miss < 0 {
-            acc = (acc + miss).max(-self.recon_add[k] - 5);
-        }
-        self.recon_acc[k] = acc;
-        if acc > 5 {
-            if let Some(s) = slots {
-                if s.0.map_or(false, |a| s.1 < a) {
-                    return;
-                }
-            }
-            match self.recon_t[k] {
-                None => self.recon_t[k] = Some(now),
-                Some(t) if now - t >= self.blind_sec() && self.qs_pend[k].is_none() => {
-                    self.bag_used[k] += acc;
-                    self.recon_add[k] += acc;
-                    self.recon_acc[k] = 0;
-                    self.recon_t[k] = None;
-                    self.log(format!("{name} 對帳：背包實際少掉的比算到的多 {} 瓶（快捷欄漏算），補算", comma(acc)));
-                }
-                _ => {}
-            }
-            return;
-        }
-        self.recon_t[k] = None;
-        if acc < -5 && self.recon_add[k] > 0 {
-            let back = self.recon_add[k].min(-acc);
-            self.bag_used[k] -= back;
-            self.recon_add[k] -= back;
-            self.recon_acc[k] += back;
-            self.log(format!("{name} 對帳：算到的用量比背包少掉的多 {} 瓶，退回之前補算的 {}", comma(-acc), comma(back)));
-        }
-    }
-
     pub fn blind_sec(&self) -> f64 {
         let o = self.cfg_f("ocr_sec");
         (8f64).max(2.0 * if o == 0.0 { 3.0 } else { o } + 2.0)
     }
 
-    fn drop_back(&self, ld: &Drop, slots: Option<Slots>, amt: i64, bag: bool, now: f64) -> bool {
-        let s = ld.slots.flatten();
-        let cells_back = match (s, slots) {
-            (Some(s), Some(sl)) => s.0.map_or(false, |a| a != 0 && s.1 < a) && sl.1 > s.1,
-            _ => false,
-        };
-        if (amt - ld.miss).abs() <= 5 {
-            let credit = ld.credit.unwrap_or(0);
-            return bag || ld.len() < 5 || cells_back || (credit == 0 && ld.miss <= 15);
+    pub fn rate_cap(&self, k: usize) -> f64 {
+        let s = &self.series;
+        if s.len() < 2 || s.last().unwrap().0 - s[0].0 < 600.0 {
+            return 90.0;
         }
-        amt < ld.miss && cells_back && (ld.miss - amt) as f64 <= (15f64).max((now - ld.t) / 60.0 * 90.0)
+        let used = |x: &Snap| match k {
+            0 => x.2,
+            1 => x.3,
+            _ => x.5[k],
+        };
+        let (mut peak, mut j) = (0i64, 0usize);
+        for i in 0..s.len() {
+            while s[i].0 - s[j].0 > 600.0 {
+                j += 1;
+            }
+            peak = peak.max(used(&s[i]) - used(&s[j]));
+        }
+        (peak as f64 / 10.0 * 2.0).clamp(20.0, 90.0)
+    }
+
+    fn plausible(&self, k: usize, secs: f64) -> f64 {
+        (15f64).max(secs.max(0.0) / 60.0 * self.rate_cap(k))
+    }
+
+    fn qs_pending(&self, k: usize) -> i64 {
+        match (self.qs[k], self.qs_pend[k]) {
+            (Some(q), Some(p)) => {
+                let d = (q - p.0).max(0);
+                if d as f64 <= self.plausible(k, self.now() - self.qs_t[k]) { d } else { 0 }
+            }
+            _ => 0,
+        }
+    }
+
+    fn qs_live(&self, k: usize) -> bool {
+        self.is_qs_mode(k) && self.qs[k].is_some() && self.now() - self.qs_t[k] <= self.blind_sec()
+    }
+
+    fn drop_back(&self, k: usize, ld: &Drop, amt: i64, now: f64) -> bool {
+        let tol = 5.max(ld.miss / 50);
+        (amt - ld.miss).abs() <= tol || (ld.n > 0 && amt < ld.miss && (ld.miss - amt) as f64 <= self.plausible(k, now - ld.t))
     }
 
     pub fn set_total(&mut self, k: usize, tv: i64, slots: Option<Slots>) {
-        let (est, now) = (self.est_total(k), self.now());
+        let now = self.now();
         let name = self.name(k);
-        if let Some(mut est) = est {
-            let (lr, ld) = (self.last_rise[k], self.last_drop[k].clone());
-            let amt = tv - est;
+        if let Some(mut est) = self.est_total(k) {
+            let prev = self.total[k].unwrap();
             let bag = !self.is_qs_mode(k);
-            if amt > 5 && self.qs_sus[k] >= amt - 5 {
-                let back = amt.min(self.qs_sus_cnt[k]);
-                self.qs_used[k] -= back;
-                let tail = if back != 0 { format!("，退回用量 {}", comma(back)) } else { String::new() };
-                self.log(format!("{name} 背包總數 {}，預估 {}（多 {}）→ 快捷欄之前讀錯多扣了{tail}", comma(tv), comma(est), comma(amt)));
-            } else if amt > 5 && ld.as_ref().map_or(false, |ld| now - ld.t < 1800.0 && self.drop_back(ld, slots, amt, bag, now)) {
-                let ld = ld.unwrap();
-                let mut back = amt.min(ld.n);
-                self.bag_used[k] -= back;
-                if ld.len() > 3 {
-                    self.qs_credit[k] = (self.qs_credit[k] - amt.min(ld.credit.unwrap_or(0))).max(0);
-                }
-                if bag && ld.len() > 4 && ld.miss - amt > ld.n - back {
-                    let extra = ld.miss - amt - (ld.n - back);
-                    self.bag_used[k] += extra;
-                    back -= extra;
-                }
-                self.last_drop[k] = None;
-                let tail = if back > 0 {
-                    format!("→ 退回用量 {}", comma(back))
-                } else if back < 0 {
-                    format!("→ 補算用量 {}", comma(-back))
+            let qs_live = self.qs_live(k);
+            let pend = if qs_live { self.qs_pending(k) } else { 0 };
+            let plaus = self.plausible(k, now - prev.3);
+            let since = self.qs_all[k] - prev.1;
+            let amt = tv - (est - pend);
+            if amt > 5 {
+                let ld = self.last_drop[k].clone().filter(|d| now - d.t < 1800.0 && self.drop_back(k, d, amt, now));
+                let (explain, roll) = if bag {
+                    (false, 0)
+                } else if !self.qs_ok[k] {
+                    (since >= amt - 5, self.qs_used[k] - self.anchor_used[k])
                 } else {
-                    "→ 不算補貨".into()
+                    (self.qs_sus[k] >= amt - 5, self.qs_sus_cnt[k])
                 };
-                self.log(format!("{name} 背包總數 {}，上次少掉的 {} 又出現了 {}（當時被擋住）{tail}", comma(tv), comma(ld.miss), comma(amt)));
-            } else if amt > 5 {
-                self.last_rise[k] = Some((amt, est, now, self.qs_all[k], self.qs_add[k]));
-                self.log(format!("{name} 背包總數 {}，預估 {}（多 {}）→ 不算用量，當作新的總數", comma(tv), comma(est), comma(amt)));
+                let roll = roll.clamp(0, amt);
+                if explain {
+                    self.qs_used[k] -= roll;
+                    let tail = if roll != 0 { format!("，退回用量 {}", comma(roll)) } else { String::new() };
+                    self.log(format!("{name} 背包總數 {}，預估 {}（多 {}）→ 快捷欄之前讀錯多扣了{tail}", comma(tv), comma(est), comma(amt)));
+                    self.qs_rebase(k);
+                } else if let Some(ld) = ld {
+                    let back = amt.min(ld.n);
+                    self.bag_used[k] -= back;
+                    self.qs_credit[k] = (self.qs_credit[k] - amt).max(0);
+                    self.last_drop[k] = None;
+                    let tail = if back > 0 { format!("→ 退回用量 {}", comma(back)) } else { "→ 不算補貨".into() };
+                    self.log(format!("{name} 背包總數 {}，上次少掉的 {} 又出現了 {}（當時被擋住）{tail}", comma(tv), comma(ld.miss), comma(amt)));
+                } else {
+                    self.last_rise[k] = Some((amt, est, now, self.qs_all[k], self.qs_add[k]));
+                    self.seg_buy[k] += amt;
+                    self.log(format!("{name} 背包總數 {}，預估 {}（多 {}）→ 不算用量，當作新的總數", comma(tv), comma(est), comma(amt)));
+                }
             } else {
-                if let Some((amt0, est0, t0, q0, a0)) = lr {
+                if let Some((amt0, est0, t0, q0, a0)) = self.last_rise[k] {
                     if now - t0 < 1800.0 {
                         let est0_now = est0 - (self.qs_all[k] - q0) + (self.qs_add[k] - a0);
-                        let qs_live = !bag && self.qs[k].is_some() && now - self.qs_t[k] <= self.blind_sec();
-                        let tol = 5 + if bag { 30 } else { 0 };
-                        if (tv - est0_now).abs() <= tol && (qs_live || (est - tv) as f64 > (15f64).max((now - t0) / 60.0 * 90.0)) {
+                        let back = tv - est0_now <= 5 && (est0_now - tv) as f64 <= self.plausible(k, now - t0);
+                        if back && (qs_live || (est - tv) as f64 > plaus) {
                             self.last_rise[k] = None;
+                            self.seg_buy[k] -= amt0;
                             self.log(format!("{name} 背包總數 {}，回到變多之前的數字 → 上次多出來的 {} 是讀錯，不算用量", comma(tv), comma(amt0)));
                             est = est0_now;
                         } else if (tv - est).abs() <= 5 {
@@ -1017,33 +1150,56 @@ impl Tracker {
                         }
                     }
                 }
-                if tv != est {
-                    self.log(format!("{name} 背包總數 {}，預估 {}（差 {}）", comma(tv), comma(est), comma_signed(tv - est)));
+                let miss = est - pend - tv;
+                if miss != 0 {
+                    self.log(format!("{name} 背包總數 {}，預估 {}（差 {}）", comma(tv), comma(est - pend), comma_signed(-miss)));
                 }
-            }
-            let miss = est - tv;
-            if bag {
-                if self.running && miss > 0 {
-                    let prev_t = self.total[k].unwrap().3;
-                    let mut n = if miss as f64 <= (15f64).max((now - prev_t) / 60.0 * 90.0) { miss } else { 0 };
-                    n = 0.max(n.min(pround(n as f64 * (self.active() - self.total_act[k]) / (now - prev_t).max(1.0))));
-                    self.bag_used[k] += n;
-                    self.last_drop[k] = Some(Drop { miss, t: now, n, credit: Some(0), slots: Some(slots) });
-                    if n == 0 {
+                if miss > 5 || (miss > 0 && (bag && self.running || !bag && !qs_live)) {
+                    if prev.3 < self.fill_from || miss as f64 > plaus {
+                        self.last_drop[k] = Some(Drop { miss, t: now, n: 0 });
                         self.log(format!("{name} 背包少了 {}，不像是喝掉的，不算用量", comma(miss)));
-                    }
-                }
-            } else {
-                let n = if miss > 0 { self.qs_miss(k, miss, now, slots) } else { Some(0) };
-                if self.counting() {
-                    if amt > 5 {
-                        self.reconcile(k, 0, now, slots);
-                        if self.recon_acc[k] > 0 {
-                            self.recon_acc[k] = (self.recon_acc[k] - amt).max(0);
-                        }
                     } else {
-                        let m = if n == Some(-1) || miss <= 0 { miss } else { 0 };
-                        self.reconcile(k, m, now, slots);
+                        let frac = (self.active() - self.total_act[k]).max(0.0) / (now - prev.3).max(1.0);
+                        let n = miss.min(pround(miss as f64 * frac)).max(0);
+                        self.bag_used[k] += n;
+                        self.last_drop[k] = Some(Drop { miss, t: now, n });
+                        if bag {
+                        } else if !qs_live {
+                            self.qs_credit[k] += miss;
+                            self.qs_pend[k] = None;
+                            if n != 0 {
+                                self.log(format!("{name} 快捷欄讀不到的這段時間用掉 {} 瓶（用背包的數字補算）", comma(n)));
+                            }
+                        } else {
+                            self.log(format!("{name} 背包少了 {}，快捷欄只算到 {} → 快捷欄漏算，補算 {}", comma(miss), comma(since), comma(n)));
+                            let whole = slots.map_or(true, |s| s.0.map_or(true, |a| s.1 >= a));
+                            if since == 0 && whole && self.qs_blind_t[k] < prev.3 && now - prev.3 >= 20.0 {
+                                self.qs_flat_strike(k);
+                            }
+                        }
+                    }
+                } else if !bag && self.counting() {
+                    if self.recon_acc[k] == 0 {
+                        self.drift_from[k] = (prev.3, prev.1);
+                    }
+                    let acc = (self.recon_acc[k] + miss).max(-self.recon_add[k] - 5);
+                    self.recon_acc[k] = acc;
+                    if acc > 5 {
+                        self.bag_used[k] += acc;
+                        self.recon_add[k] += acc;
+                        self.recon_acc[k] = 0;
+                        self.log(format!("{name} 對帳：背包實際少掉的比算到的多 {} 瓶（快捷欄漏算），補算", comma(acc)));
+                        let (t0, q0) = self.drift_from[k];
+                        let whole = slots.map_or(true, |s| s.0.map_or(true, |a| s.1 >= a));
+                        if self.qs_all[k] == q0 && whole && self.qs_blind_t[k] < t0 && now - t0 >= 20.0 {
+                            self.qs_flat_strike(k);
+                        }
+                    } else if acc < -5 && self.recon_add[k] > 0 {
+                        let back = self.recon_add[k].min(-acc);
+                        self.bag_used[k] -= back;
+                        self.recon_add[k] -= back;
+                        self.recon_acc[k] += back;
+                        self.log(format!("{name} 對帳：算到的用量比背包少掉的多 {} 瓶，退回之前補算的 {}", comma(-acc), comma(back)));
                     }
                 }
             }
@@ -1052,9 +1208,88 @@ impl Tracker {
         }
         self.total[k] = Some((tv, self.qs_all[k], self.qs_add[k], now));
         self.total_act[k] = self.active();
+        self.anchor_used[k] = self.qs_used[k];
+        self.anchor_cells[k] = self.inv_cells[k].clone();
         self.qs_sus[k] = 0;
         self.qs_sus_cnt[k] = 0;
-        self.qs_unv[k] = (0, 0);
+        self.qs_switched[k] = false;
+        self.seg_check(k, tv);
+    }
+
+    fn qs_rebase(&mut self, k: usize) {
+        let Some(v) = self.qs[k] else { return };
+        let cells = &self.inv_cells[k];
+        if cells.is_empty() || cells.iter().any(|&c| (c - v).abs() <= 2) {
+            return;
+        }
+        let cap = self.cfg_f("stack_max") as i64;
+        let part: Vec<i64> = cells.iter().copied().filter(|&c| c != cap).collect();
+        let pool = if part.is_empty() { cells } else { &part };
+        let c = *pool.iter().min_by_key(|&&c| (c - v).abs()).unwrap();
+        let name = self.name(k);
+        self.log(format!("{name} 快捷欄的 {v} 背包裡沒有，改用背包裡的 {c}"));
+        self.qs_wrong[k] = Some((v, self.now()));
+        self.qs[k] = Some(c);
+        self.qs_pend[k] = None;
+        self.qs_rise[k] = None;
+        self.qs_t[k] = self.now();
+        self.qs_fell[k] = false;
+        self.qs_ok[k] = true;
+    }
+
+    fn flush_drift(&mut self) {
+        for k in self.ks() {
+            let acc = self.recon_acc[k];
+            if acc > 0 {
+                self.bag_used[k] += acc;
+                self.recon_add[k] += acc;
+                self.recon_acc[k] = 0;
+                let name = self.name(k);
+                self.log(format!("{name} 對帳：背包比算到的多少了 {} 瓶，補進用量", comma(acc)));
+            }
+        }
+    }
+
+    fn seg_check(&mut self, k: usize, tv: i64) {
+        if !self.counting() {
+            return;
+        }
+        let used = self.used(k);
+        let Some((t0, u0)) = self.seg_base[k] else {
+            self.seg_base[k] = Some((tv, used));
+            self.seg_buy[k] = 0;
+            return;
+        };
+        let expect = t0 + self.seg_buy[k] - tv;
+        let got = used - u0;
+        let now = self.now();
+        if (expect - got).abs() > 5 && now - self.seg_check_t[k] > 600.0 {
+            self.seg_check_t[k] = now;
+            let name = self.name(k);
+            self.log(format!(
+                "{name} 整段核對：背包從 {} 到 {}（補貨 {}）應該用掉 {}，算到 {}（差 {}）",
+                comma(t0),
+                comma(tv),
+                comma(self.seg_buy[k]),
+                comma(expect),
+                comma(got),
+                comma_signed(got - expect)
+            ));
+        }
+    }
+
+    fn qs_flat_strike(&mut self, k: usize) {
+        let now = self.now();
+        let (n, last) = self.qs_flat[k];
+        let n = if now - last < 1800.0 { n + 1 } else { 1 };
+        self.qs_flat[k] = (n, now);
+        if n >= 2 && now - self.qs_flat_said[k] > 600.0 {
+            self.qs_flat_said[k] = now;
+            let name = self.name(k);
+            let msg = format!("快捷欄的{name}一段時間未減少，可能用錯藥水，或檢查設定重新框選");
+            self.say(msg.clone(), 15.0);
+            self.log(msg);
+        }
     }
 
     pub fn feed_inv(&mut self, k: usize, stacks: &[Option<i64>]) -> &'static str {
@@ -1062,8 +1297,10 @@ impl Tracker {
         if stacks.iter().any(|v| v.map_or(true, |v| cap != 0 && v > cap)) {
             return "bad";
         }
-        let tv: i64 = stacks.iter().map(|v| v.unwrap()).sum();
+        let cells: Vec<i64> = stacks.iter().map(|v| v.unwrap()).collect();
+        let tv: i64 = cells.iter().sum();
         let n = stacks.len() as i64;
+        self.inv_cells[k] = cells.clone();
         let cnt = match &mut self.inv_pend[k] {
             Some(p) if p.0 == tv && p.1 == n => {
                 p.2 += 1;
@@ -1074,58 +1311,129 @@ impl Tracker {
                 1
             }
         };
+        let pend = if self.qs_live(k) { self.qs_pending(k) } else { 0 };
+        let plaus = self.total[k].map_or(15.0, |t| self.plausible(k, self.now() - t.3));
         let need = match self.est_total(k) {
             None => 3,
-            Some(e) if tv > e + 5 => 4,
-            Some(e) if (e - tv) as f64 > (60f64).max((self.now() - self.total[k].unwrap().3) / 60.0 * 40.0) => {
-                if self.inv_slots[k].map_or(false, |s| s != 0 && n < s) && e - tv > 200 { 6 } else { 4 }
-            }
+            Some(e) if tv > e - pend + 5 => 4,
+            Some(e) if self.qs_live(k) && self.inv_slots[k].map_or(true, |s| n >= s) && (e - pend - tv) as f64 > plaus => 4,
             _ => 2,
         };
         if cnt < need {
             return "wait";
         }
-        if self.hidden_cells(k, tv, n) {
-            return "ok";
+        match self.hidden_cells(k, tv, n, &cells) {
+            Hide::Hold => {}
+            Hide::Fill(total, hidden) => {
+                let slots = self.inv_slots[k];
+                self.set_total(k, total, Some((slots, slots.unwrap_or(n))));
+                self.anchor_cells[k].extend(hidden);
+            }
+            Hide::No => {
+                let slots = (self.inv_slots[k], n);
+                self.inv_slots[k] = Some(n);
+                self.set_total(k, tv, Some(slots));
+            }
         }
-        let slots = (self.inv_slots[k], n);
-        self.inv_slots[k] = Some(n);
-        self.set_total(k, tv, Some(slots));
         "ok"
     }
 
-    fn hidden_cells(&mut self, k: usize, tv: i64, n: i64) -> bool {
+    fn hidden_cells(&mut self, k: usize, tv: i64, n: i64, cells: &[i64]) -> Hide {
         let now = self.now();
         let (Some(e), Some(slots)) = (self.est_total(k), self.inv_slots[k]) else {
             self.inv_hide[k] = None;
-            return false;
+            return Hide::No;
         };
-        let qs_live = self.is_qs_mode(k) && self.qs[k].is_some() && now - self.qs_t[k] <= self.blind_sec();
-        let lim = (15f64).max((self.active() - self.total_act[k]) / 60.0 * 90.0);
-        if !(qs_live && n < slots && (e - tv) as f64 > lim) {
+        let prev_t = self.total[k].map_or(now, |t| t.3);
+        let qs_live = self.qs_live(k);
+        let miss = e - if qs_live { self.qs_pending(k) } else { 0 } - tv;
+        if !(n < slots && miss > 5) {
             self.inv_hide[k] = None;
-            return false;
+            return Hide::No;
+        }
+        if let Some((_, est0, t0, q0, a0)) = self.last_rise[k] {
+            let est0_now = est0 - (self.qs_all[k] - q0) + (self.qs_add[k] - a0);
+            if now - t0 < 1800.0 && tv - est0_now <= 5 && (est0_now - tv) as f64 <= self.plausible(k, now - t0) {
+                self.inv_hide[k] = None;
+                return Hide::No;
+            }
+        }
+        let plaus = self.plausible(k, now - prev_t);
+        let qs_v = self.qs[k].filter(|_| qs_live);
+        let qs_seen = |v: i64| cells.iter().any(|&c| (c - v).abs() <= 2);
+        let in_use_hidden = qs_v.map_or(false, |v| v > 0 && miss + 5 >= v && !qs_seen(v));
+        let no_switch = qs_live && self.qs_blind_t[k] < prev_t && !self.qs_switched[k];
+        let too_small = self.anchor_cells[k].iter().min().map_or(false, |&m| miss < m - 2);
+        let too_fast = miss as f64 > plaus;
+        let still = self.inv_hide[k].is_some();
+        if !(still || self.both_drop || in_use_hidden || no_switch || too_small || too_fast) {
+            self.inv_hide[k] = None;
+            return Hide::No;
         }
         let name = self.name(k);
-        match self.inv_hide[k] {
-            None => {
-                self.inv_hide[k] = Some(now);
-                self.log(format!(
-                    "{name} 背包只看到 {} 格、共 {}，比預估的 {} 少 {}，快捷欄又沒有換格 → 可能有格子被擋住（氣場、提示框），先當作還在",
-                    n,
-                    comma(tv),
-                    comma(e),
-                    comma(e - tv)
-                ));
-                true
-            }
-            Some(t0) if now - t0 < 600.0 => true,
-            Some(_) => {
+        if let Some(t0) = self.inv_hide[k] {
+            if now - t0 >= 600.0 {
                 self.inv_hide[k] = None;
-                self.log(format!("{name} 背包一直少了 {}（超過 10 分鐘）→ 當作真的少了（賣掉或放倉庫），不算用量", comma(e - tv)));
-                false
+                self.log(format!("{name} 背包一直少了 {}（超過 10 分鐘）→ 當作真的少了（賣掉或放倉庫），不算用量", comma(miss)));
+                return Hide::No;
             }
         }
+        let mut left: Vec<Option<i64>> = self.anchor_cells[k].iter().map(|&a| Some(a)).collect();
+        let mut used = 0;
+        let mut fit = true;
+        for &c in cells {
+            let pick = left
+                .iter()
+                .enumerate()
+                .filter_map(|(i, a)| a.filter(|&a| a + 2 >= c).map(|a| (a - c, i)))
+                .min();
+            let Some((d, i)) = pick else {
+                fit = false;
+                break;
+            };
+            left[i] = None;
+            used += d.max(0);
+        }
+        let mut hidden: Vec<i64> = left.into_iter().flatten().collect();
+        let cap = self.cfg_f("stack_max") as i64;
+        let bag = !self.is_qs_mode(k);
+        if fit && (bag || self.qs_switched[k]) {
+            if let Some(i) = hidden.iter().enumerate().filter(|(_, a)| **a != cap).min_by_key(|(_, a)| **a).map(|(i, _)| i) {
+                let a = hidden[i];
+                if !bag || (used + a) as f64 <= plaus {
+                    hidden.remove(i);
+                    if bag {
+                        used += a;
+                    }
+                }
+            }
+        }
+        if fit {
+            if let Some(v) = qs_v.filter(|&v| !qs_seen(v)) {
+                match hidden.iter().enumerate().filter(|(_, a)| **a + 2 >= v).min_by_key(|(_, a)| **a - v).map(|(i, _)| i) {
+                    Some(i) => hidden[i] = v,
+                    None => fit = false,
+                }
+            }
+        }
+        if fit && hidden.is_empty() {
+            self.inv_hide[k] = None;
+            return Hide::No;
+        }
+        if self.inv_hide[k].is_none() {
+            self.inv_hide[k] = Some(now);
+            self.log(format!(
+                "{name} 背包只看到 {} 格、共 {}，比預估的 {} 少 {} → 可能有格子被擋住（氣場、提示框），先當作還在",
+                n,
+                comma(tv),
+                comma(e),
+                comma(miss)
+            ));
+        }
+        if !fit || used as f64 > plaus {
+            return Hide::Hold;
+        }
+        Hide::Fill(tv + hidden.iter().sum::<i64>(), hidden)
     }
 
     pub fn forget_potion(&mut self, k: usize) {
@@ -1133,13 +1441,15 @@ impl Tracker {
         self.inv_pend[k] = None;
         self.inv_slots[k] = None;
         self.inv_hide[k] = None;
+        self.inv_cells[k].clear();
+        self.anchor_cells[k].clear();
+        self.seg_base[k] = None;
+        self.seg_buy[k] = 0;
         self.last_rise[k] = None;
         self.last_drop[k] = None;
         self.recon_acc[k] = 0;
-        self.recon_t[k] = None;
         self.qs_credit[k] = 0;
         self.qs_sus[k] = 0;
-        self.qs_unv[k] = (0, 0);
         self.qs_bad[k] = (0, -1);
     }
 
@@ -1151,6 +1461,10 @@ impl Tracker {
         self.qs_fell[k] = false;
         self.qs_ok[k] = false;
         self.qs_fixing[k] = false;
+        self.qs_switched[k] = false;
+        self.qs_blind_t[k] = self.now();
+        self.qs_flat[k] = (0, f64::MIN);
+        self.qs_wrong[k] = None;
         self.qs_far_last[k] = f64::MIN;
         self.qs_far_t[k] = f64::MIN;
     }
@@ -1161,13 +1475,20 @@ impl Tracker {
         let n = (mark - self.used_mark[k]).max(0);
         self.cost_prev[k] += n as f64 * self.price(k);
         self.prev_price[k] = Some(self.price(k));
+        if n > 0 && !old.is_empty() && old != name && self.pot_names[k].last() != Some(&old) {
+            self.pot_names[k].push(old.clone());
+        }
         self.used_mark[k] = mark;
         let num = |v: f64| -> Value { if v == v.trunc() { json!(v as i64) } else { json!(v) } };
         self.cfg.insert(format!("{}_name", KS[k]), json!(name));
         self.cfg.insert(format!("{}_price", KS[k]), num(price));
         self.forget_potion(k);
         self.forget_qs(k);
-        if n > 0 {
+        if old.is_empty() {
+            self.log(format!("新增藥水：{name}"));
+        } else if name.is_empty() {
+            self.log(format!("不算{old}了（用掉的 {} 瓶照{old}的單價算）", comma(self.used(k))));
+        } else if n > 0 {
             self.log(format!("{old}換成{name}（之前用掉的 {} 瓶照{old}的單價算）", comma(n)));
         } else {
             self.log(format!("{old}換成{name}"));
@@ -1202,14 +1523,15 @@ impl Tracker {
                 }
             }
         }
-        let cost = self.cost_of(0) + self.cost_of(1);
+        let cost = self.cost_all();
         s.cost = cost;
+        s.sold = self.sold;
         s.cost_hr = per(cost);
         s.eff = if cost > 0.0 { Some(self.gain as f64 / cost * 1e4) } else { None };
         s.hp_hr = per(self.used(0) as f64);
         s.mp_hr = per(self.used(1) as f64);
         s.income = self.income();
-        s.profit = s.income.map(|i| i as f64 - cost);
+        s.profit = s.income.map(|i| (i + self.sold) as f64 - cost);
         s.income_hr = s.income.and_then(|i| per(i as f64));
         s.profit_hr = s.profit.and_then(per);
         s
@@ -1219,6 +1541,10 @@ impl Tracker {
         self.check_idle();
         let s = self.stats();
         let a = s.active;
+        if self.counting() && self.curve.last().map_or(true, |l| a - l.0 >= 30.0) {
+            let pt = self.curve_pt(a);
+            self.curve.push(pt);
+        }
         if self.counting() && self.series.last().map_or(true, |l| a - l.0 >= 5.0) {
             let snap = self.snapshot(a);
             self.series.push(snap);
@@ -1242,15 +1568,15 @@ impl Tracker {
             self.exp_move_t = now;
             self.started_at = Some(local_iso());
             self.fill_from = self.fill_from.max(now - 600.0);
-            self.recon_acc = [0; 2];
-            self.recon_t = [None; 2];
+            self.recon_acc = [0; NP];
+            self.seg_base = [None; NP];
             self.seg_t = now;
             let a = self.active();
-            for k in 0..2 {
+            for k in self.ks() {
                 self.total_act[k] = self.total_act[k].min(a);
             }
             self.start_meso();
-            for k in 0..2 {
+            for k in self.ks() {
                 if let Some(t) = self.total[k] {
                     if !self.is_qs_mode(k) && now - t.3 > 600.0 {
                         self.total[k] = None;
@@ -1258,7 +1584,7 @@ impl Tracker {
                 }
             }
             let need_exp = !self.has("exp_region") && self.exp_last.is_none();
-            let no_pot = (0..2).any(|k| self.est_total(k).is_none() && !self.region(k));
+            let no_pot = self.ks().into_iter().any(|k| self.est_total(k).is_none() && !self.region(k));
             let need_meso = self.has("meso_region") && self.meso_anchor.is_none();
             self.say("開始計時", 4.0);
             self.log("===== 開始計時 =====".into());
@@ -1266,14 +1592,15 @@ impl Tracker {
                 self.say("開始計時，請打開背包，讓浮窗讀藥水總數和楓幣", 8.0);
             } else if need_exp {
                 self.say("開始計時。還沒框選 EXP，請按 ☰ 框選畫面下方的 EXP 數字", 8.0);
-            } else if no_pot {
+            } else if no_pot && !self.hint_pot {
+                self.hint_pot = true;
                 self.say("開始計時。藥水還沒設定，按 ☰ 框選快捷欄或背包就能算藥水用量", 8.0);
             }
         } else if self.paused {
             self.paused = false;
             self.run_start = now;
             self.exp_move_t = now;
-            self.cap_since = [None; 2];
+            self.cap_since = [None; NP];
             let no_end = self.seg_pending;
             if no_end {
                 self.seg_pending = false;
@@ -1281,8 +1608,8 @@ impl Tracker {
                 self.start_meso();
             }
             self.log("繼續計時".into());
-            self.recon_acc = [0; 2];
-            self.recon_t = [None; 2];
+            self.recon_acc = [0; NP];
+            self.seg_base = [None; NP];
             self.seg_t = now;
             if no_end && self.has("meso_region") && self.meso_anchor.is_some() {
                 self.say("繼續計時（暫停期間沒記錄到楓幣，這段的楓幣增減會計算）", 8.0);
@@ -1292,17 +1619,19 @@ impl Tracker {
                 self.say("繼續計時", 4.0);
             }
         } else {
+            self.flush_drift();
             self.acc += now - self.run_start - back;
             self.paused = true;
             if back != 0.0 {
                 let acc = self.acc;
                 self.series.retain(|x| x.0 <= acc);
+                self.curve.retain(|x| x.0 <= acc);
                 if let Some(ma) = self.meso_anchor {
                     if ma.1 > acc {
                         self.meso_anchor = Some((ma.0, acc, ma.2));
                     }
                 }
-                for k in 0..2 {
+                for k in self.ks() {
                     self.total_act[k] = self.total_act[k].min(acc);
                 }
             }
@@ -1372,7 +1701,7 @@ impl Tracker {
             self.running = false;
             self.paused = false;
             self.new_session();
-            for k in 0..2 {
+            for k in self.ks() {
                 if !self.is_qs_mode(k) {
                     self.total[k] = None;
                 }
@@ -1416,21 +1745,26 @@ impl Tracker {
                 }
             }
         }
-        let mut qs_raw: [Option<i64>; 2] = [None; 2];
-        for k in 0..2 {
+        let mut qs_raw: [Option<i64>; NP] = [None; NP];
+        for k in self.ks() {
             let Some(text) = &out.qs[k] else { continue };
             self.raw.insert(KS[k].into(), text.clone());
             let cap = self.cfg_f("stack_max") as i64;
             let v = parse_count(text).filter(|&x| !(cap != 0 && x > cap));
             qs_raw[k] = v.filter(|_| out.qs_err[k].is_none());
             if out.qs_err[k].is_some() {
+                self.qs_blind_t[k] = self.now();
                 parts.push(format!("{} 截圖失敗", util::short_name(&self.name(k))));
             } else if v.is_none() {
+                self.qs_blind_t[k] = self.now();
                 parts.push(format!("{} 讀不到", util::short_name(&self.name(k))));
             } else if self.qs_lost.0.is_some() {
+                self.qs_blind_t[k] = self.now();
                 parts.push(format!("{} 讀不到", util::short_name(&self.name(k))));
             } else if game_visible {
                 self.feed_qs(k, v.unwrap());
+            } else {
+                self.qs_blind_t[k] = self.now();
             }
             if cap != 0 && self.counting() && self.qs[k] == Some(cap) {
                 self.cap_since[k] = Some(self.cap_since[k].unwrap_or_else(|| self.now()));
@@ -1438,7 +1772,7 @@ impl Tracker {
                 self.cap_since[k] = None;
             }
         }
-        let steady: Vec<bool> = (0..2)
+        let steady: Vec<bool> = (0..NP)
             .map(|k| match qs_raw[k] {
                 Some(v) if v.to_string().bytes().any(|c| c > b'1') => {
                     self.qs_prev_raw[k] == Some(v) || self.qs[k].map_or(false, |q| v < q && q - v <= 15)
@@ -1446,12 +1780,13 @@ impl Tracker {
                 _ => false,
             })
             .collect();
-        for k in 0..2 {
+        for k in self.ks() {
             if out.qs[k].is_some() {
                 self.qs_prev_raw[k] = qs_raw[k];
             }
         }
-        let both_lost = (0..2).all(|k| out.qs[k].is_some() && out.qs_err[k].is_none() && !steady[k]);
+        let framed: Vec<usize> = (0..NP).filter(|&k| out.qs[k].is_some()).collect();
+        let both_lost = framed.len() >= 2 && framed.iter().all(|&k| out.qs_err[k].is_none() && !steady[k]);
         if both_lost && game_visible && out.exp.is_some() {
             let since = *self.qs_lost.0.get_or_insert(self.now());
             if !self.qs_lost.1 && self.now() - since >= 15.0 {
@@ -1467,7 +1802,14 @@ impl Tracker {
         if let Some(inv) = &out.inv {
             let mut info: Vec<String> = vec![];
             let bag_open = inv.iter().any(|x| x.as_ref().map_or(false, |v| !v.is_empty()));
-            for k in 0..2 {
+            self.both_drop = (0..NP)
+                .filter(|&k| {
+                    inv[k].as_ref().map_or(false, |s| !s.is_empty() && self.inv_slots[k].map_or(false, |sl| (s.len() as i64) < sl))
+                        && self.total[k].map_or(false, |t| self.now() - t.3 < 30.0)
+                })
+                .count()
+                >= 2;
+            for k in self.ks() {
                 let name = self.name(k);
                 let Some(stacks) = &inv[k] else {
                     if bag_open && self.has("inv_region") && !self.inv_ready(Some(k)) {
@@ -1501,13 +1843,19 @@ impl Tracker {
         if let Some(text) = &out.meso {
             self.raw.insert("meso".into(), text.clone());
             if let Some(v) = parse_meso(text) {
-                if out.meso_box_only && !self.meso_near(v) {
+                if out.meso_box_only && !self.meso_near(v) && self.meso_settled(v) {
+                    self.log(format!("楓幣一直讀到 {} 左右，跟上次差很多但很穩定，當作錢真的變了", comma(v)));
+                    self.meso_pend = Some((v, 9, BTreeSet::from([-1])));
+                    let r = self.feed_meso(v, out.bag_id);
+                    results.push(r);
+                } else if out.meso_box_only && !self.meso_near(v) {
                     if self.meso_rej != Some(v) {
                         self.meso_rej = Some(v);
                         let tail = self.meso.map_or("還沒讀過楓幣".to_string(), |l| format!("跟上次的 {} 差太多", comma(l)));
-                        self.log(format!("楓幣讀到 {}，{tail}，當成讀錯（背包裡看到藥水時再確認）", comma(v)));
+                        self.log(format!("楓幣讀到 {}，{tail}，先不採用（一直讀到差不多的數字、或背包裡看到藥水時再確認）", comma(v)));
                     }
                 } else {
+                    self.meso_cand = None;
                     let r = self.feed_meso(v, out.bag_id);
                     results.push(r);
                 }
@@ -1546,7 +1894,7 @@ impl Tracker {
     }
 
     fn get_json(&self, key: &str) -> Value {
-        let per = |f: &dyn Fn(usize) -> Value| json!({"hp": f(0), "mp": f(1)});
+        let per = |f: &dyn Fn(usize) -> Value| Value::Object((0..NP).map(|k| (KS[k].to_string(), f(k))).collect());
         match key {
             "gain" => json!(self.gain),
             "hist" => json!(self.hist.iter().map(|h| json!([h.0, h.1])).collect::<Vec<_>>()),
@@ -1555,26 +1903,20 @@ impl Tracker {
             "qs_used" => per(&|k| json!(self.qs_used[k])),
             "bag_used" => per(&|k| json!(self.bag_used[k])),
             "meso_anchor" => self.meso_anchor.map_or(Value::Null, |m| json!([m.0, m.1, m.2])),
-            "series" => json!(self.series.iter().map(|s| json!([s.0, s.1, s.2, s.3, s.4])).collect::<Vec<_>>()),
+            "series" => json!(self.series.iter().map(|s| json!([s.0, s.1, s.2, s.3, s.4, s.5])).collect::<Vec<_>>()),
+            "curve" => curve_json(&self.curve),
             "qs_sus_cnt" => per(&|k| json!(self.qs_sus_cnt[k])),
             "cost_prev" => per(&|k| json!(self.cost_prev[k])),
             "prev_price" => per(&|k| json!(self.prev_price[k])),
+            "pot_names" => per(&|k| json!(self.pot_names[k])),
             "used_mark" => per(&|k| json!(self.used_mark[k])),
-            "last_drop" => per(&|k| match &self.last_drop[k] {
-                None => Value::Null,
-                Some(d) => {
-                    let mut v = vec![json!(d.miss), json!(d.t), json!(d.n)];
-                    if let Some(c) = d.credit {
-                        v.push(json!(c));
-                    }
-                    if let Some(s) = d.slots {
-                        v.push(s.map_or(Value::Null, |s| json!([s.0, s.1])));
-                    }
-                    Value::Array(v)
-                }
-            }),
+            "last_drop" => per(&|k| self.last_drop[k].as_ref().map_or(Value::Null, |d| json!([d.miss, d.t, d.n]))),
+            "anchor_used" => per(&|k| json!(self.anchor_used[k])),
             "inc_done" => self.inc_done.map_or(Value::Null, |d| json!([d.0, d.1])),
             "seg_pending" => json!(self.seg_pending),
+            "sold" => json!(self.sold),
+            "pause_up" => self.pause_up.map_or(Value::Null, |p| json!([p.0, p.1])),
+            "sale_ask" => json!(self.sale_ask),
             "recon_acc" => per(&|k| json!(self.recon_acc[k])),
             "recon_add" => per(&|k| json!(self.recon_add[k])),
             "need" => json!(self.need),
@@ -1600,7 +1942,7 @@ impl Tracker {
         m.insert("hist".into(), json!(self.hist.iter().filter(|x| x.0 > a - 3900.0).map(|h| json!([h.0, h.1])).collect::<Vec<_>>()));
         m.insert(
             "series".into(),
-            json!(self.series.iter().filter(|x| x.0 > a - 3900.0).map(|s| json!([s.0, s.1, s.2, s.3, s.4])).collect::<Vec<_>>()),
+            json!(self.series.iter().filter(|x| x.0 > a - 3900.0).map(|s| json!([s.0, s.1, s.2, s.3, s.4, s.5])).collect::<Vec<_>>()),
         );
         m.insert("saved_at".into(), json!(self.now()));
         m.insert("acc".into(), json!(a));
@@ -1626,16 +1968,27 @@ impl Tracker {
             "deaths" => self.deaths = i(v).unwrap_or(0),
             "series" => {
                 self.series = v.as_array().map_or(vec![], |a| {
-                    a.iter().filter_map(|x| Some((f(&x[0])?, i(&x[1])?, i(&x[2])?, i(&x[3])?, i(&x[4])))).collect()
+                    a.iter()
+                        .filter_map(|x| {
+                            let mut u: [i64; NP] = std::array::from_fn(|k| x.get(5).and_then(|v| v.get(k)).and_then(i).unwrap_or(0));
+                            let (h, m) = (i(&x[2])?, i(&x[3])?);
+                            (u[0], u[1]) = (h, m);
+                            Some((f(&x[0])?, i(&x[1])?, h, m, i(&x[4]), u))
+                        })
+                        .collect()
                 })
             }
+            "curve" => self.curve = parse_curve(v),
             "seg_pending" => self.seg_pending = v.as_bool().unwrap_or(false),
-            "need" => self.need = f(v),
+            "sold" => self.sold = i(v).unwrap_or(0),
+            "pause_up" => self.pause_up = v.as_array().and_then(|a| Some((i(a.first()?)?, i(a.get(1)?)?))),
+            "sale_ask" => self.sale_ask = i(v),
+            "need" => self.need = f(v).filter(|&n| exp_table::level_of(n).is_some()),
             "meso" => self.meso = i(v),
             "meso_t" => self.meso_t = f(v).unwrap_or(0.0),
             "inc_done" => self.inc_done = v.as_array().map(|a| (i(&a[0]).unwrap_or(0), a.last().and_then(f).unwrap_or(0.0))),
             _ => {
-                for k in 0..2 {
+                for k in 0..NP {
                     let x = v.get(KS[k]).cloned().unwrap_or(Value::Null);
                     match key {
                         "qs_used" => self.qs_used[k] = i(&x).unwrap_or(0),
@@ -1643,6 +1996,9 @@ impl Tracker {
                         "qs_sus_cnt" => self.qs_sus_cnt[k] = i(&x).unwrap_or(0),
                         "cost_prev" => self.cost_prev[k] = f(&x).unwrap_or(0.0),
                         "prev_price" => self.prev_price[k] = f(&x),
+                        "pot_names" => {
+                            self.pot_names[k] = x.as_array().map_or(vec![], |a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                        }
                         "used_mark" => self.used_mark[k] = i(&x).unwrap_or(0),
                         "recon_acc" => self.recon_acc[k] = i(&x).unwrap_or(0),
                         "recon_add" => self.recon_add[k] = i(&x).unwrap_or(0),
@@ -1659,16 +2015,9 @@ impl Tracker {
                                 .and_then(|a| Some((i(&a[0])?, i(&a[1])?, f(&a[2])?, i(&a[3])?, i(&a[4])?)))
                         }
                         "last_drop" => {
-                            self.last_drop[k] = x.as_array().and_then(|a| {
-                                Some(Drop {
-                                    miss: i(a.first()?)?,
-                                    t: f(a.get(1)?)?,
-                                    n: i(a.get(2)?)?,
-                                    credit: a.get(3).and_then(i),
-                                    slots: a.get(4).map(|s| s.as_array().map(|s| (i(&s[0]), i(&s[1]).unwrap_or(0)))),
-                                })
-                            })
+                            self.last_drop[k] = x.as_array().and_then(|a| Some(Drop { miss: i(a.first()?)?, t: f(a.get(1)?)?, n: i(a.get(2)?)? }))
                         }
+                        "anchor_used" => self.anchor_used[k] = i(&x).unwrap_or(0),
                         _ => {}
                     }
                 }
@@ -1718,7 +2067,7 @@ impl Tracker {
             self.running = false;
             self.paused = false;
             self.new_session();
-            for k in 0..2 {
+            for k in self.ks() {
                 if !self.is_qs_mode(k) {
                     self.total[k] = None;
                 }
@@ -1736,14 +2085,8 @@ impl Tracker {
         }
     }
 
-    pub fn log_session(&mut self) -> Saved {
-        let a = self.active();
-        if a < 60.0 {
-            return Saved::TooShort;
-        }
-        let Some(path) = self.log_path.clone() else { return Saved::Main };
-        let s = self.stats();
-        let header: Vec<String> = [
+    pub fn csv_header(&self) -> Vec<String> {
+        [
             "開始時間".to_string(),
             "練功分鐘".into(),
             "獲得EXP".into(),
@@ -1758,8 +2101,23 @@ impl Tracker {
             "撿到楓幣".into(),
             "淨賺楓幣".into(),
             "淨賺每小時".into(),
+            "賣掉落物".into(),
+            "紅水名稱".into(),
+            "藍水名稱".into(),
+            "其他藥水".into(),
         ]
-        .to_vec();
+        .to_vec()
+    }
+
+    pub fn log_session(&mut self) -> Saved {
+        self.flush_drift();
+        let a = self.active();
+        if a < 60.0 {
+            return Saved::TooShort;
+        }
+        let Some(path) = self.log_path.clone() else { return Saved::Main };
+        let s = self.stats();
+        let header = self.csv_header();
         let started = self.started_at.clone().unwrap_or_else(local_iso);
         let row = vec![
             started.get(..16).unwrap_or(&started).replace('T', " "),
@@ -1776,17 +2134,81 @@ impl Tracker {
             s.income.map_or(String::new(), |v| v.to_string()),
             s.profit.map_or(String::new(), py_num),
             s.profit_hr.map_or(String::new(), |v| pround(v).to_string()),
+            if self.sold > 0 { self.sold.to_string() } else { String::new() },
+            self.pot_label(0),
+            self.pot_label(1),
+            self.extra_label(),
         ];
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let ext = path.extension().map_or("csv".to_string(), |e| e.to_string_lossy().to_string());
         let alt = path.with_file_name(format!("{stem}_{}.{ext}", local_stamp()));
         for (i, p) in [path, alt].iter().enumerate() {
             if write_csv_row(p, &header, &row).is_ok() {
+                let line = json!({"start": row[0], "pts": curve_json(&self.curve_now())}).to_string() + "\n";
+                let _ = append_line(&p.with_file_name(CURVE_FILE), &line);
                 return if i == 0 { Saved::Main } else { Saved::Other(p.file_name().unwrap().to_string_lossy().into()) };
             }
         }
         Saved::Failed
     }
+}
+
+pub fn remove_csv_lines(path: &std::path::Path, pick: &dyn Fn(&str) -> bool) -> std::io::Result<Vec<String>> {
+    let raw = std::fs::read(path)?;
+    let bom = raw.starts_with(b"\xef\xbb\xbf");
+    let text = String::from_utf8_lossy(if bom { &raw[3..] } else { &raw }).to_string();
+    let (gone, keep): (Vec<&str>, Vec<&str>) = text.split_inclusive('\n').partition(|l| pick(l));
+    if gone.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut out = if bom { b"\xef\xbb\xbf".to_vec() } else { vec![] };
+    for l in keep {
+        out.extend(l.as_bytes());
+    }
+    let tmp = path.with_extension("csv.tmp");
+    std::fs::write(&tmp, out)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(gone.into_iter().map(|l| l.to_string()).collect())
+}
+
+pub fn restore_csv_lines(path: &std::path::Path, header: &[String], lines: &[String]) -> std::io::Result<()> {
+    use std::io::Write;
+    if !path.exists() {
+        let head = header.iter().map(|s| csv_field(s)).collect::<Vec<_>>().join(",") + "\r\n";
+        let mut out = b"\xef\xbb\xbf".to_vec();
+        out.extend(head.as_bytes());
+        std::fs::write(path, out)?;
+    }
+    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+    let raw = std::fs::read(path)?;
+    if !raw.is_empty() && !raw.ends_with(b"\n") {
+        f.write_all(b"\r\n")?;
+    }
+    for l in lines {
+        f.write_all(l.as_bytes())?;
+        if !l.ends_with('\n') {
+            f.write_all(b"\r\n")?;
+        }
+    }
+    Ok(())
+}
+
+pub fn curve_json(v: &[CurvePt]) -> Value {
+    json!(v.iter().map(|c| json!([(c.0 * 10.0).round() / 10.0, c.1, c.2, c.3, c.4, c.5.round(), c.6])).collect::<Vec<_>>())
+}
+
+pub fn parse_curve(v: &Value) -> Vec<CurvePt> {
+    let f = |x: &Value| x.as_f64();
+    let i = |x: &Value| x.as_i64().or_else(|| x.as_f64().map(|v| v.round() as i64));
+    v.as_array().map_or(vec![], |a| a.iter().filter_map(|x| Some((f(&x[0])?, i(&x[1])?, i(&x[2])?, i(&x[3])?, i(&x[4]), f(&x[5]).unwrap_or(0.0), i(&x[6]).unwrap_or(0)))).collect())
+}
+
+fn append_line(p: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::OpenOptions::new().create(true).append(true).open(p)?.write_all(line.as_bytes())
 }
 
 fn py_opt(v: Option<f64>) -> String {
@@ -1815,6 +2237,12 @@ fn csv_field(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+fn digits_differ(a: i64, b: i64) -> usize {
+    let (a, b) = (a.to_string().into_bytes(), b.to_string().into_bytes());
+    let at = |s: &[u8], i: usize| s.len().checked_sub(i + 1).map(|j| s[j]);
+    (0..a.len().max(b.len())).filter(|&i| at(&a, i) != at(&b, i)).count()
 }
 
 fn write_csv_row(path: &std::path::Path, header: &[String], row: &[String]) -> std::io::Result<()> {
@@ -1961,6 +2389,72 @@ mod switch_tests {
     }
 
     #[test]
+    fn steady_new_meso_is_accepted_but_one_digit_misread_is_not() {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.meso = Some(111_779_054);
+        let out = |m: &str| OcrOut { meso: Some(m.into()), meso_box_only: true, ..Default::default() };
+        for i in 0..20 {
+            t.fake_now = Some(1.8e9 + i as f64 * 2.0);
+            t.on_ocr(&out("171,779,054"));
+        }
+        assert_eq!(t.meso, Some(111_779_054));
+        let mut seen = vec![];
+        for i in 0..10 {
+            t.fake_now = Some(1.9e9 + i as f64 * 2.0);
+            t.on_ocr(&out(&format!("89,27{i},000")));
+            seen.push(t.meso);
+        }
+        assert_eq!(seen[3], Some(111_779_054));
+        assert_eq!(seen[5], Some(89_275_000));
+    }
+
+    #[test]
+    fn meso_gained_while_paused_is_asked_as_sale() {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("meso_region".into(), json!([1, 1, 10, 10]));
+        let bag = |t: &mut Tracker, m: i64, at: f64| {
+            for j in 0..3 {
+                t.fake_now = Some(at + j as f64);
+                t.on_ocr(&OcrOut { meso: Some(comma(m)), ..Default::default() });
+            }
+        };
+        t.toggle_run(0.0);
+        bag(&mut t, 50_000_000, 1.8e9 + 1.0);
+        bag(&mut t, 50_400_000, 1.8e9 + 600.0);
+        assert_eq!(t.income(), Some(400_000));
+        t.toggle_run(0.0);
+        bag(&mut t, 58_400_000, 1.8e9 + 700.0);
+        bag(&mut t, 55_400_000, 1.8e9 + 800.0);
+        assert_eq!(t.sale_ask, None);
+        t.fake_now = Some(1.8e9 + 890.0);
+        t.toggle_run(0.0);
+        assert_eq!(t.sale_ask, None, "繼續時背包沒開著：等讀到楓幣再問");
+        bag(&mut t, 55_400_000, 1.8e9 + 900.0);
+        assert_eq!(t.sale_ask, Some(8_000_000));
+        t.answer_sale(true);
+        assert_eq!((t.sale_ask, t.sold), (None, 8_000_000));
+        bag(&mut t, 55_500_000, 1.8e9 + 1000.0);
+        let s = t.stats();
+        assert_eq!(s.income, Some(500_000));
+        assert_eq!(s.profit, Some(8_500_000.0));
+        assert_eq!(t.curve_pt(1.0).6, 8_000_000);
+        let saved = t.state_json();
+        let mut u = Tracker::new(default_cfg(), Some(1.8e9 + 1000.0));
+        u.load_state(&saved);
+        assert_eq!(u.sold, 8_000_000);
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("meso_region".into(), json!([1, 1, 10, 10]));
+        t.toggle_run(0.0);
+        bag(&mut t, 50_000_000, 1.8e9 + 1.0);
+        t.toggle_run(0.0);
+        bag(&mut t, 53_000_000, 1.8e9 + 100.0);
+        t.toggle_run(0.0);
+        assert_eq!(t.sale_ask, Some(3_000_000));
+        t.answer_sale(false);
+        assert_eq!((t.sold, t.stats().profit), (0, Some(0.0)));
+    }
+
+    #[test]
     fn switching_keeps_old_price_for_used_potions() {
         let mut t = Tracker::new(default_cfg(), Some(1.8e9));
         t.cfg.insert("hp_name".into(), json!("沙嗲"));
@@ -1973,6 +2467,40 @@ mod switch_tests {
         assert_eq!(t.cost_of(0), 26000.0 + 3.0 * 5600.0);
         assert_eq!(t.span_cost(0, 8, 13), 2.0 * 2600.0 + 3.0 * 5600.0);
         assert_eq!(t.span_cost(0, 11, 13), 2.0 * 5600.0);
+        assert_eq!((t.pot_label(0), t.pot_label(1)), ("沙嗲→馴鹿奶".to_string(), "紅豆刨冰".to_string()));
+        t.switch_potion(1, "藍藥水", 200.0, None);
+        assert_eq!(t.pot_label(1), "藍藥水");
+        let data = { t.running = true; t.state_json() };
+        let mut u = Tracker::new(t.cfg.clone(), Some(1.8e9));
+        u.load_state(&data);
+        assert_eq!(u.pot_label(0), "沙嗲→馴鹿奶");
+        assert_eq!(&t.csv_header()[15..], ["紅水名稱", "藍水名稱", "其他藥水"]);
+        assert_eq!(t.ks(), vec![0, 1]);
+        t.cfg.insert("p3_name".into(), json!("力量藥水"));
+        t.cfg.insert("p3_price".into(), json!(1000));
+        assert_eq!(t.ks(), vec![0, 1, 2]);
+        let before = t.cost_all();
+        t.qs_used[2] = 3;
+        assert_eq!(t.cost_all(), before + 3000.0);
+        assert_eq!(t.extra_label(), "力量藥水 3");
+        let data = { t.running = true; t.state_json() };
+        let mut v = Tracker::new(t.cfg.clone(), Some(1.8e9));
+        v.load_state(&data);
+        assert_eq!(v.used(2), 3);
+        let mut old = data.clone();
+        old["qs_used"] = json!({"hp": 13, "mp": 0});
+        let mut w = Tracker::new(t.cfg.clone(), Some(1.8e9));
+        w.load_state(&old);
+        assert_eq!((w.used(0), w.used(2)), (13, 0));
+        let cost = t.cost_all();
+        t.switch_potion(2, "", 1000.0, None);
+        assert_eq!(t.ks(), vec![0, 1]);
+        assert_eq!(t.cost_all(), cost);
+        assert_eq!(t.extra_label(), "力量藥水 3");
+        t.switch_potion(2, "經驗加倍", 500.0, None);
+        t.qs_used[2] = 5;
+        assert_eq!(t.cost_all(), cost + 2.0 * 500.0);
+        assert_eq!(t.extra_label(), "力量藥水→經驗加倍 5");
         let mut t2 = Tracker::new(default_cfg(), Some(1.8e9));
         t2.cfg.insert("hp_price".into(), json!(2600));
         t2.qs_used[0] = 13;
@@ -1989,6 +2517,91 @@ mod switch_tests {
 }
 
 #[cfg(test)]
+mod exp_tests {
+    use super::*;
+
+    fn read(t: &mut Tracker, exp: i64, pct: f64) {
+        let out = OcrOut { exp: Some(format!("{exp}[{pct:.2}%]")), ..Default::default() };
+        t.on_ocr(&out);
+        t.fake_now = Some(t.now() + 3.0);
+    }
+
+    #[test]
+    fn level_up_uses_the_table() {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("exp_region".into(), json!([0, 0, 10, 10]));
+        t.running = true;
+        let need152 = exp_table::need(152).unwrap();
+        let need153 = exp_table::need(153).unwrap();
+        for e in [163_000_000i64, 163_000_000, 163_400_000, 163_836_876] {
+            read(&mut t, e, (e as f64 * 100.0 / need152 as f64 * 100.0).floor() / 100.0);
+        }
+        assert_eq!(t.level(), Some(152));
+        assert_eq!(t.need, Some(need152 as f64));
+        read(&mut t, 39_943, 0.02);
+        read(&mut t, 39_943, 0.02);
+        assert_eq!(t.levelups, 1);
+        assert_eq!(t.level(), Some(153));
+        assert_eq!(t.need, Some(need153 as f64));
+        let mut e = 39_943i64;
+        let gain0 = t.gain;
+        let mut got = 0;
+        while e < 6_000_000 {
+            e += 140_000;
+            got += 140_000;
+            read(&mut t, e, (e as f64 * 100.0 / need153 as f64 * 100.0).floor() / 100.0);
+        }
+        assert_eq!(t.gain - gain0, got, "{:#?}", t.logs);
+        assert!(!t.logs.iter().any(|l| l.contains("對不上")), "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn garbage_exp_read_is_not_a_new_base() {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("exp_region".into(), json!([0, 0, 10, 10]));
+        t.running = true;
+        let need153 = exp_table::need(153).unwrap();
+        let e = 44_703_895i64;
+        let p = (e as f64 * 100.0 / need153 as f64 * 100.0).floor() / 100.0;
+        read(&mut t, e, p);
+        read(&mut t, e, p);
+        assert_eq!(t.level(), Some(153));
+        for _ in 0..12 {
+            read(&mut t, 5, p);
+        }
+        assert_eq!(t.need, Some(need153 as f64), "{:#?}", t.logs);
+        assert_eq!(t.level(), Some(153));
+        assert!(!t.logs.iter().any(|l| l.contains("重新當基準")), "{:#?}", t.logs);
+        let g0 = t.gain;
+        read(&mut t, e + 100_000, p);
+        read(&mut t, e + 200_000, p);
+        assert_eq!(t.gain - g0, 200_000, "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn saved_garbage_need_is_dropped() {
+        let need153 = exp_table::need(153).unwrap() as f64;
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.load_state(&json!({"need": 19.334880123743233}));
+        assert_eq!(t.need, None);
+        t.load_state(&json!({"need": need153}));
+        assert_eq!(t.need, Some(need153));
+    }
+
+    #[test]
+    fn need_from_low_percent_snaps_to_the_table() {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("exp_region".into(), json!([0, 0, 10, 10]));
+        let need = exp_table::need(153).unwrap();
+        let e = (need as f64 * 0.0137) as i64;
+        read(&mut t, e, 1.37);
+        read(&mut t, e, 1.37);
+        assert_eq!(t.level(), Some(153));
+        assert_eq!(t.need, Some(need as f64));
+    }
+}
+
+#[cfg(test)]
 mod qs_tests {
     use super::*;
 
@@ -2001,8 +2614,8 @@ mod qs_tests {
 
     fn feed(t: &mut Tracker, qs: Option<&str>, bag: Option<(&[i64], i64)>) {
         let out = OcrOut {
-            qs: [qs.map(|s| s.to_string()), None],
-            inv: bag.map(|(cells, _)| [Some(cells.iter().map(|&c| Some(c)).collect()), None]),
+            qs: two(qs.map(|s| s.to_string()), None),
+            inv: bag.map(|(cells, _)| two(Some(cells.iter().map(|&c| Some(c)).collect()), None)),
             bag_id: bag.map_or(0, |b| b.1),
             ..Default::default()
         };
@@ -2180,7 +2793,7 @@ mod qs_tests {
     fn both_quickslots_lost_asks_to_check() {
         let mut t = tracker();
         let read = |t: &mut Tracker, a: &str, b: &str| {
-            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: [Some(a.into()), Some(b.into())], ..Default::default() };
+            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: two(Some(a.into()), Some(b.into())), ..Default::default() };
             t.on_ocr(&out);
             t.fake_now = Some(t.now() + 3.0);
         };
@@ -2203,7 +2816,7 @@ mod qs_tests {
     fn closed_quickslot_noise_still_counts_as_lost() {
         let mut t = tracker();
         let read = |t: &mut Tracker, a: &str, b: &str| {
-            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: [Some(a.into()), Some(b.into())], ..Default::default() };
+            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: two(Some(a.into()), Some(b.into())), ..Default::default() };
             t.on_ocr(&out);
             t.fake_now = Some(t.now() + 3.0);
         };
@@ -2226,7 +2839,7 @@ mod qs_tests {
     fn closed_quickslot_noise_is_not_used() {
         let mut t = tracker();
         let read = |t: &mut Tracker, a: &str, b: &str| {
-            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: [Some(a.into()), Some(b.into())], ..Default::default() };
+            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: two(Some(a.into()), Some(b.into())), ..Default::default() };
             t.on_ocr(&out);
             t.fake_now = Some(t.now() + 3.0);
         };
@@ -2246,7 +2859,7 @@ mod qs_tests {
     fn steady_reading_is_not_lost() {
         let mut t = tracker();
         let read = |t: &mut Tracker, a: &str, b: &str| {
-            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: [Some(a.into()), Some(b.into())], ..Default::default() };
+            let out = OcrOut { exp: Some("12345678[50.00%]".into()), qs: two(Some(a.into()), Some(b.into())), ..Default::default() };
             t.on_ocr(&out);
             t.fake_now = Some(t.now() + 3.0);
         };
@@ -2279,5 +2892,362 @@ mod qs_tests {
             feed(&mut t, Some("2826"), Some((&[2828, 3000, 1765], id)));
         }
         assert!(!t.logs.iter().any(|l| l.contains("框錯位置")));
+    }
+
+    #[test]
+    fn covered_cell_in_use_is_not_usage() {
+        let mut t = tracker();
+        let mut q = 64;
+        for _ in 0..3 {
+            feed(&mut t, Some("64"), Some((&[3000, 64], 1)));
+        }
+        for i in 0..40 {
+            if i % 2 == 1 {
+                q -= 1;
+            }
+            feed(&mut t, Some(&q.to_string()), Some((&[3000], 2)));
+        }
+        for _ in 0..6 {
+            feed(&mut t, Some(&q.to_string()), Some((&[3000, q], 3)));
+        }
+        assert_eq!(t.used(0), 64 - q);
+        assert!(!t.logs.iter().any(|l| l.contains("補算")));
+    }
+
+    #[test]
+    fn extra_digit_on_almost_empty_stack_is_not_a_switch() {
+        let mut t = tracker();
+        for _ in 0..3 {
+            feed(&mut t, Some("16"), Some((&[3000, 16], 1)));
+        }
+        for v in [15, 15, 14, 14] {
+            feed(&mut t, Some(&v.to_string()), Some((&[3000, v], 2)));
+        }
+        for v in ["113", "113", "113", "13", "13", "12", "12"] {
+            feed(&mut t, Some(v), None);
+        }
+        assert_eq!(t.qs_used[0], 4);
+        assert!(!t.logs.iter().any(|l| l.contains("換下一格")));
+        for v in ["1", "1", "3000", "3000"] {
+            feed(&mut t, Some(v), None);
+        }
+        assert_eq!(t.qs_used[0], 16);
+        assert_eq!(t.logs.iter().filter(|l| l.contains("換下一格")).count(), 1);
+    }
+
+    #[test]
+    fn both_potions_losing_cells_at_once_is_a_cover() {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("inv_region".into(), json!([0, 0, 100, 100]));
+        t.running = true;
+        let bag = |t: &mut Tracker, hp: &[i64], mp: &[i64], id: i64, n: usize| {
+            for _ in 0..n {
+                let out = OcrOut {
+                    inv: Some(two(Some(hp.iter().map(|&c| Some(c)).collect()), Some(mp.iter().map(|&c| Some(c)).collect()))),
+                    bag_id: id,
+                    ..Default::default()
+                };
+                t.on_ocr(&out);
+                t.fake_now = Some(t.now() + 3.0);
+            }
+        };
+        bag(&mut t, &[3000, 40], &[3000, 3000, 25], 1, 4);
+        bag(&mut t, &[3000, 38], &[3000, 3000, 24], 1, 3);
+        assert_eq!((t.used(0), t.used(1)), (2, 1));
+        bag(&mut t, &[3000], &[3000, 3000], 1, 40);
+        assert_eq!((t.used(0), t.used(1)), (2, 1));
+        assert_eq!(t.est_total(0), Some(3038));
+        bag(&mut t, &[3000, 30], &[3000, 3000, 20], 1, 4);
+        assert_eq!((t.used(0), t.used(1)), (10, 5));
+    }
+
+    #[test]
+    fn periodic_cover_keeps_usage() {
+        let mut t = tracker();
+        t.cfg.insert("mp_region".into(), json!([0, 20, 10, 10]));
+        let (mut hp, mut mp) = (3260i64, 13309i64);
+        let start = (hp, mp);
+        for i in 0..1000 {
+            if i >= 10 && i % 2 == 1 {
+                hp -= 1;
+            }
+            if i >= 10 && i % 33 == 32 {
+                mp -= 1;
+            }
+            let hp_use = if hp > 3000 { hp - 3000 } else { hp };
+            let mp_use = mp - 1584 - 9000;
+            let covered = i % 86 >= 70;
+            let hp_cells: Vec<i64> = if hp <= 3000 { vec![hp] } else if covered { vec![3000] } else { vec![3000, hp_use] };
+            let mp_cells: Vec<i64> = if covered { vec![1584, mp_use, 3000] } else { vec![1584, mp_use, 3000, 3000, 3000] };
+            let out = OcrOut {
+                qs: two(Some(hp_use.to_string()), Some(mp_use.to_string())),
+                inv: Some(two(Some(hp_cells.into_iter().map(Some).collect()), Some(mp_cells.into_iter().map(Some).collect()))),
+                bag_id: 1,
+                ..Default::default()
+            };
+            t.on_ocr(&out);
+            t.fake_now = Some(t.now() + 3.0);
+        }
+        let (real_hp, real_mp) = (start.0 - hp, start.1 - mp);
+        assert!((t.used(0) - real_hp).abs() <= 3, "馴鹿奶 算到 {} 實際 {real_hp}", t.used(0));
+        assert!((t.used(1) - real_mp).abs() <= 3, "紅豆刨冰 算到 {} 實際 {real_mp}", t.used(1));
+        assert!(!t.logs.iter().any(|l| l.contains("改用背包裡的") || l.contains("對帳")), "{:#?}", t.logs);
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    fn tracker() -> Tracker {
+        let mut t = Tracker::new(default_cfg(), Some(1.8e9));
+        t.cfg.insert("hp_region".into(), json!([0, 0, 10, 10]));
+        t.cfg.insert("inv_region".into(), json!([0, 0, 100, 100]));
+        t.tpl_exists = two(true, true);
+        t.running = true;
+        t
+    }
+
+    fn bag_only() -> Tracker {
+        let mut t = tracker();
+        t.cfg.remove("hp_region");
+        t
+    }
+
+    fn feed(t: &mut Tracker, qs: Option<&str>, bag: Option<&[i64]>) {
+        let out = OcrOut {
+            exp: Some("12345678[50.00%]".into()),
+            qs: two(qs.map(|s| s.to_string()), None),
+            inv: bag.map(|cells| two(Some(cells.iter().map(|&c| Some(c)).collect()), None)),
+            bag_id: 1,
+            ..Default::default()
+        };
+        t.on_ocr(&out);
+        t.fake_now = Some(t.now() + 3.0);
+    }
+
+    fn feed_n(t: &mut Tracker, n: usize, qs: Option<&str>, bag: Option<&[i64]>) {
+        for _ in 0..n {
+            feed(t, qs, bag);
+        }
+    }
+
+    #[test]
+    fn quickslot_misread_is_undone_at_the_next_anchor() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("300"), Some(&[3000, 300]));
+        feed_n(&mut t, 2, Some("290"), None);
+        assert_eq!(t.used(0), 10);
+        feed_n(&mut t, 4, Some("290"), Some(&[3000, 300]));
+        assert_eq!(t.used(0), 0, "{:#?}", t.logs);
+        feed_n(&mut t, 3, Some("300"), Some(&[3000, 300]));
+        assert_eq!(t.used(0), 0);
+        assert_eq!(t.est_total(0), Some(3300));
+    }
+
+    #[test]
+    fn blind_quickslot_is_filled_from_the_bag_once() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("500"), Some(&[3000, 500]));
+        feed_n(&mut t, 8, Some(""), None);
+        feed_n(&mut t, 3, Some(""), Some(&[3000, 488]));
+        assert_eq!(t.used(0), 12, "{:#?}", t.logs);
+        feed_n(&mut t, 3, Some("488"), None);
+        feed_n(&mut t, 2, Some("487"), None);
+        assert_eq!(t.used(0), 13);
+    }
+
+    #[test]
+    fn bag_mode_small_cell_covered_is_refunded_when_it_returns() {
+        let mut t = bag_only();
+        feed_n(&mut t, 3, None, Some(&[3000, 40]));
+        feed_n(&mut t, 2, None, Some(&[3000, 38]));
+        assert_eq!(t.used(0), 2);
+        t.fake_now = Some(t.now() + 120.0);
+        feed_n(&mut t, 3, None, Some(&[3000]));
+        assert_eq!(t.used(0), 40);
+        t.fake_now = Some(t.now() + 60.0);
+        feed_n(&mut t, 4, None, Some(&[3000, 35]));
+        assert_eq!(t.used(0), 5, "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn covered_full_cell_still_counts_visible_drinking() {
+        let mut t = bag_only();
+        feed_n(&mut t, 3, None, Some(&[3000, 3000, 900]));
+        let mut v = 900;
+        for i in 0..40 {
+            if i % 2 == 1 {
+                v -= 1;
+            }
+            feed(&mut t, None, Some(&[3000, v]));
+        }
+        feed(&mut t, None, Some(&[3000, v]));
+        assert_eq!(t.est_total(0), Some(6000 + v));
+        assert_eq!(t.used(0), 900 - v, "{:#?}", t.logs);
+        feed_n(&mut t, 3, None, Some(&[3000, 3000, v]));
+        assert_eq!(t.used(0), 900 - v);
+        assert!(!t.logs.iter().any(|l| l.contains("又出現了")), "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn bag_mode_used_up_cell_is_not_a_cover() {
+        let mut t = bag_only();
+        feed_n(&mut t, 3, None, Some(&[3000, 3000, 6]));
+        feed_n(&mut t, 2, None, Some(&[3000, 3000, 3]));
+        t.fake_now = Some(t.now() + 30.0);
+        feed_n(&mut t, 2, None, Some(&[3000, 2998]));
+        assert_eq!(t.used(0), 8, "{:#?}", t.logs);
+        assert_eq!(t.est_total(0), Some(5998));
+        assert!(!t.logs.iter().any(|l| l.contains("被擋住")));
+    }
+
+    #[test]
+    fn odd_increase_is_a_purchase_not_usage() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("300"), Some(&[3000, 300]));
+        feed_n(&mut t, 2, Some("298"), Some(&[3000, 298]));
+        feed_n(&mut t, 4, Some("298"), Some(&[3000, 298, 7]));
+        assert_eq!(t.used(0), 2);
+        assert_eq!(t.est_total(0), Some(3305));
+        assert!(t.logs.iter().any(|l| l.contains("當作新的總數")));
+    }
+
+    #[test]
+    fn flat_quickslot_with_falling_bag_asks_to_check_the_frame() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("3000"), Some(&[3000, 500]));
+        let mut v = 500;
+        for i in 0..60 {
+            if i % 3 == 2 {
+                v -= 1;
+            }
+            feed(&mut t, Some("3000"), Some(&[3000, v]));
+        }
+        assert!((500 - v) - t.used(0) <= 5, "算到 {} 實際 {}", t.used(0), 500 - v);
+        assert!(t.alert.as_ref().map_or(false, |a| a.0.contains("一段時間未減少")), "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn small_drift_is_added_when_pausing() {
+        let mut t = tracker();
+        t.running = false;
+        t.toggle_run(0.0);
+        feed_n(&mut t, 3, Some("3000"), Some(&[3000, 500]));
+        feed_n(&mut t, 2, Some("3000"), Some(&[3000, 497]));
+        assert_eq!(t.used(0), 0);
+        t.toggle_run(0.0);
+        assert_eq!(t.used(0), 3, "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn sudden_implausible_bag_drop_waits() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("117"), Some(&[3000, 117]));
+        feed_n(&mut t, 2, Some("117"), Some(&[3000, 57]));
+        assert_eq!(t.est_total(0), Some(3117));
+        feed_n(&mut t, 2, Some("117"), Some(&[3000, 117]));
+        assert_eq!(t.est_total(0), Some(3117));
+        assert!(!t.logs.iter().any(|l| l.contains("不像是喝掉的")), "{:#?}", t.logs);
+    }
+
+    #[test]
+    fn sold_stack_is_not_usage() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("500"), Some(&[3000, 500]));
+        feed_n(&mut t, 3, Some("500"), Some(&[500]));
+        assert_eq!(t.est_total(0), Some(3500));
+        t.fake_now = Some(t.now() + 601.0);
+        feed_n(&mut t, 3, Some("500"), Some(&[500]));
+        assert_eq!(t.est_total(0), Some(500));
+        assert_eq!(t.used(0), 0);
+    }
+
+    #[test]
+    fn rate_cap_follows_the_player() {
+        let mut t = tracker();
+        assert_eq!(t.rate_cap(0), 90.0);
+        for i in 0..240 {
+            t.series.push((i as f64 * 5.0, 0, i as i64 * 100 / 120, 0, None, [0; NP]));
+        }
+        assert_eq!(t.rate_cap(0), 20.0);
+        t.series.clear();
+        for i in 0..240 {
+            t.series.push((i as f64 * 5.0, 0, i as i64 * 2, 0, None, [0; NP]));
+        }
+        assert_eq!(t.rate_cap(0), 48.0);
+    }
+
+    #[test]
+    fn anchor_state_survives_save_and_load() {
+        let mut t = tracker();
+        feed_n(&mut t, 3, Some("300"), Some(&[3000, 300]));
+        feed_n(&mut t, 2, Some("290"), None);
+        let data = t.state_json();
+        let mut u = tracker();
+        u.load_state(&data);
+        assert_eq!(u.anchor_used, t.anchor_used);
+        assert_eq!(u.total, t.total);
+        assert_eq!(u.used(0), 10);
+    }
+
+    #[test]
+    fn csv_rows_can_be_removed_and_restored() {
+        let dir = std::env::temp_dir().join(format!("csv_edit_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("練功紀錄.csv");
+        let _ = std::fs::remove_file(&p);
+        let t = tracker();
+        let head = t.csv_header();
+        let row = |start: &str| {
+            let mut r = vec![start.to_string()];
+            r.extend(["30.0", "6000000", "12000000", "1", "0", "60", "5", "400000", "800000", "150", "500000", "100000", "200000"].map(String::from));
+            r
+        };
+        write_csv_row(&p, &head, &row("2026-10-06 08:00")).unwrap();
+        write_csv_row(&p, &head, &row("2026-10-06 09:00")).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let gone = remove_csv_lines(&p, &|l| l.starts_with("2026-10-06 08:00")).unwrap();
+        assert_eq!(gone.len(), 1);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with('\u{feff}'));
+        assert!(!text.contains("08:00") && text.contains("09:00"));
+        assert!(remove_csv_lines(&p, &|l| l.starts_with("2026-01-01")).unwrap().is_empty());
+        restore_csv_lines(&p, &head, &gone).unwrap();
+        let mut a_lines: Vec<String> = String::from_utf8_lossy(&before).lines().map(String::from).collect();
+        let mut b_lines: Vec<String> = std::fs::read_to_string(&p).unwrap().lines().map(String::from).collect();
+        a_lines.sort();
+        b_lines.sort();
+        assert_eq!(a_lines, b_lines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn curve_is_saved_with_the_session_and_written_on_log() {
+        let dir = std::env::temp_dir().join(format!("curve_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut t = tracker();
+        t.log_path = Some(dir.join("練功紀錄.csv"));
+        t.running = false;
+        t.toggle_run(0.0);
+        for i in 0..20 {
+            t.fake_now = Some(t.now() + 10.0);
+            t.gain += 1000;
+            if i == 5 {
+                t.qs_used[0] += 3;
+            }
+            t.tick();
+        }
+        assert!(t.curve.len() >= 6, "{:?}", t.curve);
+        let mut u = tracker();
+        u.load_state(&t.state_json());
+        assert_eq!(u.curve.len(), t.curve.len());
+        assert_eq!(t.log_session(), Saved::Main);
+        let text = std::fs::read_to_string(dir.join(CURVE_FILE)).unwrap();
+        let v: Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        let pts = parse_curve(&v["pts"]);
+        assert_eq!(pts.last().unwrap().1, 20_000);
+        assert_eq!(pts.last().unwrap().2, 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,6 +3,7 @@
 mod autoframe;
 mod dialogs;
 mod files;
+mod history;
 mod platform;
 mod potions;
 mod runner;
@@ -36,7 +37,7 @@ fn main() {
     let mut t = tracker::Tracker::new(cfg.clone(), None);
     t.state_path = Some(paths.state.clone());
     t.log_path = Some(paths.csv.clone());
-    t.tpl_exists = [paths.tpl[0].exists(), paths.tpl[1].exists()];
+    t.tpl_exists = std::array::from_fn(|k| paths.tpl[k].exists());
     if let Ok(s) = std::fs::read_to_string(&paths.state) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
             t.load_state(&v);

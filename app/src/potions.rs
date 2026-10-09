@@ -1,7 +1,12 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-pub const KIND: [&str; 2] = ["hp", "mp"];
+pub use tracker::KS as KIND;
+const BOOK_KINDS: [&str; 3] = ["hp", "mp", "extra"];
+
+fn bk(k: usize) -> usize {
+    k.min(2)
+}
 const QS_VERSION: i64 = 2;
 
 #[derive(Clone, Debug)]
@@ -45,6 +50,7 @@ impl Book {
                     let kind = match v.get("kind").and_then(|x| x.as_str()) {
                         Some("mp") => 1,
                         Some("hp") => 0,
+                        Some("extra") => 2,
                         _ => continue,
                     };
                     let Some(name) = v.get("name").and_then(|x| x.as_str()).filter(|n| !n.trim().is_empty()) else { continue };
@@ -72,7 +78,7 @@ impl Book {
             .iter()
             .map(|p| {
                 json!({
-                    "kind": KIND[p.kind],
+                    "kind": BOOK_KINDS[p.kind],
                     "name": p.name,
                     "price": num(p.price),
                     "tpl": p.tpl,
@@ -90,15 +96,15 @@ impl Book {
     }
 
     pub fn find(&self, k: usize, name: &str) -> Option<&Potion> {
-        self.list.iter().find(|p| p.kind == k && p.name == name)
+        self.list.iter().find(|p| p.kind == bk(k) && p.name == name)
     }
 
     fn find_mut(&mut self, k: usize, name: &str) -> Option<&mut Potion> {
-        self.list.iter_mut().find(|p| p.kind == k && p.name == name)
+        self.list.iter_mut().find(|p| p.kind == bk(k) && p.name == name)
     }
 
     pub fn of(&self, k: usize) -> Vec<&Potion> {
-        self.list.iter().filter(|p| p.kind == k).collect()
+        self.list.iter().filter(|p| p.kind == bk(k)).collect()
     }
 
     pub fn upsert(&mut self, k: usize, name: &str, price: f64) {
@@ -108,12 +114,12 @@ impl Book {
         }
         match self.find_mut(k, name) {
             Some(p) => p.price = price,
-            None => self.list.push(Potion { kind: k, name: name.to_string(), price, tpl: None, qs: None, qs_at: None }),
+            None => self.list.push(Potion { kind: bk(k), name: name.to_string(), price, tpl: None, qs: None, qs_at: None }),
         }
     }
 
     pub fn remove(&mut self, k: usize, name: &str) {
-        if let Some(i) = self.list.iter().position(|p| p.kind == k && p.name == name) {
+        if let Some(i) = self.list.iter().position(|p| p.kind == bk(k) && p.name == name) {
             let p = self.list.remove(i);
             if let Some(f) = p.tpl {
                 let _ = std::fs::remove_file(self.dir.join(f));
@@ -130,8 +136,8 @@ impl Book {
         let file = match self.find(k, name).and_then(|p| p.tpl.clone()) {
             Some(f) => f,
             None => {
-                let n = (1..).find(|n| !self.list.iter().any(|p| p.tpl.as_deref() == Some(&format!("{}_{n}.png", KIND[k])))).unwrap();
-                format!("{}_{n}.png", KIND[k])
+                let n = (1..).find(|n| !self.list.iter().any(|p| p.tpl.as_deref() == Some(&format!("{}_{n}.png", BOOK_KINDS[bk(k)])))).unwrap();
+                format!("{}_{n}.png", BOOK_KINDS[bk(k)])
             }
         };
         if std::fs::write(self.dir.join(&file), bytes).is_err() {
@@ -159,7 +165,7 @@ impl Book {
         if self.find(k, to).is_none() {
             return;
         }
-        let Some(i) = self.list.iter().position(|p| p.kind == k && p.name == from) else { return };
+        let Some(i) = self.list.iter().position(|p| p.kind == bk(k) && p.name == from) else { return };
         let (tpl, qs, at) = (self.list[i].tpl.take(), self.list[i].qs.take(), self.list[i].qs_at.take());
         let dir = self.dir.clone();
         let p = self.find_mut(k, to).unwrap();
@@ -194,7 +200,7 @@ impl Book {
     }
 
     pub fn drop_similar_qs(&mut self, k: usize, name: &str, sig: &[f32]) {
-        for p in self.list.iter_mut().filter(|p| p.kind == k && p.name != name) {
+        for p in self.list.iter_mut().filter(|p| p.kind == bk(k) && p.name != name) {
             if p.qs.as_ref().map_or(false, |q| diff(q, sig) < SAME) {
                 p.qs = None;
             }
@@ -202,14 +208,14 @@ impl Book {
     }
 
     pub fn clear_qs(&mut self, k: usize) {
-        for p in self.list.iter_mut().filter(|p| p.kind == k) {
+        for p in self.list.iter_mut().filter(|p| p.kind == bk(k)) {
             p.qs = None;
         }
     }
 
     pub fn reframe_qs(&mut self, k: usize, name: &str, old: Option<[i32; 4]>, new: [i32; 4]) {
         let moved = old.filter(|&o| !same_slot(o, new));
-        for p in self.list.iter_mut().filter(|p| p.kind == k) {
+        for p in self.list.iter_mut().filter(|p| p.kind == bk(k)) {
             if p.name == name {
                 p.qs_at = Some(new);
                 p.qs = None;

@@ -9,7 +9,7 @@ pub struct Paths {
     pub csv: PathBuf,
     pub detail: PathBuf,
     pub err: PathBuf,
-    pub tpl: [PathBuf; 2],
+    pub tpl: [PathBuf; tracker::NP],
     pub digits: PathBuf,
     pub models: PathBuf,
 }
@@ -45,7 +45,7 @@ impl Paths {
             csv: here.join("練功紀錄.csv"),
             detail: here.join("明細紀錄.log"),
             err: here.join("error.log"),
-            tpl: [here.join("tpl_hp.png"), here.join("tpl_mp.png")],
+            tpl: std::array::from_fn(|k| here.join(format!("tpl_{}.png", tracker::KS[k]))),
             digits: here.join("digits.json"),
             models,
             here,

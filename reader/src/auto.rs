@@ -16,6 +16,7 @@ pub struct Pair {
     pub qs: Cell,
     pub bag: Cell,
     pub cell: Rect,
+    pub sure: bool,
 }
 
 #[derive(Debug, Default)]
@@ -213,6 +214,12 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
     }
     let sx = spacing(nums.iter().map(|n| n.1.0).collect(), th * 0.4);
     let sy = spacing(nums.iter().map(|n| n.1.3).collect(), th * 0.4);
+    if std::env::var_os("AUTO_DEBUG").is_some() {
+        eprintln!("bag th {th:.1} scale {scale:.2} sx {sx:?} sy {sy:?}");
+        for (n, b) in &nums {
+            eprintln!("  num {n} @({:.0},{:.0})-({:.0},{:.0})", b.0, b.1, b.2, b.3);
+        }
+    }
     let (Some(sx), Some(sy)) = (sx, sy) else { return };
     let mut nums = nums;
     let nh = {
@@ -227,8 +234,8 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
             if nums.iter().any(|n| (n.1.0 - x0).abs() < sx * 0.4 && (n.1.3 - by).abs() < sy * 0.4) {
                 continue;
             }
-            let t = rec_zoom(ocr, img, (x0 - nh * 0.3, by - nh * 1.3, x0 + sx * 0.85, by + nh * 0.3), 3.0);
-            if let Some(n) = number(&t) {
+            let strip = (x0 - nh * 0.3, by - nh * 1.3, x0 + sx * 0.85, by + nh * 0.3);
+            if let Some(n) = gap_count(ocr, img, strip) {
                 nums.push((n, (x0, by - nh, x0 + nh * 2.0, by)));
             }
         }
@@ -265,9 +272,17 @@ fn spacing(mut v: Vec<f32>, gap: f32) -> Option<f32> {
         return None;
     }
     d.sort_by(f32::total_cmp);
-    let min = d[0];
-    let close: Vec<f32> = d.into_iter().filter(|&x| x < min * 1.3).collect();
-    Some(close[close.len() / 2])
+    let mut best: Option<(usize, Vec<f32>)> = None;
+    for &c in &d {
+        let near = |x: f32, k: f32| (x - c * k).abs() < c * 0.25;
+        let ones: Vec<f32> = d.iter().copied().filter(|&x| near(x, 1.0)).collect();
+        let support = d.iter().filter(|&&x| near(x, 1.0) || near(x, 2.0) || near(x, 3.0)).count();
+        if best.as_ref().map_or(true, |b| support > b.0) {
+            best = Some((support, ones));
+        }
+    }
+    let ones = best?.1;
+    Some(ones[ones.len() / 2])
 }
 
 fn bag_groups(imgs: &[Bgr], sigs: &[Vec<f32>]) -> Vec<usize> {
@@ -355,14 +370,17 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
                     continue;
                 }
                 let strip = (cx - cs * 0.55, by - nh * 1.5, cx + cs * 0.55, by + nh * 0.4);
-                let t = rec_zoom(ocr, img, strip, 3.0);
+                let read_n = |ocr: &mut Ocr, r: (f32, f32, f32, f32)| {
+                    number(&rec_zoom(ocr, img, r, 3.0)).filter(|n| counts.contains(n)).or_else(|| quick(ocr, img, r).filter(|n| counts.contains(n)))
+                };
+                let got = read_n(ocr, strip);
                 if debug {
-                    eprintln!("qs guess ({cx:.0},{by:.0}) {t:?}");
+                    eprintln!("qs guess ({cx:.0},{by:.0}) {got:?}");
                 }
-                if let Some(n) = number(&t).filter(|n| counts.contains(n)) {
+                if let Some(n) = got {
                     let step = nh * 0.12;
                     let mut l = strip.0;
-                    while l + step < cx && number(&rec_zoom(ocr, img, (l + step, strip.1, strip.2, strip.3), 3.0)) == Some(n) {
+                    while l + step < cx && read_n(ocr, (l + step, strip.1, strip.2, strip.3)) == Some(n) {
                         l += step;
                     }
                     let l = snap((l - nh * 0.25).max(strip.0), &lefts, pxl);
@@ -375,7 +393,6 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
     let sigs: Vec<Vec<f32>> = cells.iter().map(|c| sig(img, c.rect)).collect();
     let group = bag_groups(&imgs, &sigs);
     let mut pairs: Vec<Pair> = vec![];
-    let mut taken: Vec<Rect> = vec![];
     for (n, b) in nums {
         let (l, bt) = (snap(b.0, &lefts, pxl), snap(b.3, &bottoms, pyb) - 1.0);
         let qr = clamp_rect((l, bt - ch, l + cw, bt), img.w, img.h);
@@ -401,10 +418,12 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
             g1.1 < 0.28 && cand.iter().skip(1).all(|g2| beats(g2))
                 && gs.iter().filter(|g2| g2.0 != g1.0 && g2.1 < g1.1 + 0.015).all(|g2| g2.2 - g1.2 >= 0.2)
         });
+        let only = cand.first().filter(|g1| cand.len() == 1 && g1.1 < 0.4 && gs.first().map_or(false, |g| g.0 == g1.0));
+        let sure = pick.or(only).is_some();
         if debug {
-            eprintln!("qs {n} {:?} groups {:?} pick {:?}", qr, gs.iter().take(4).map(|x| (x.0, (x.1 * 100.0).round() / 100.0, (x.2 * 10.0).round() / 10.0, x.3)).collect::<Vec<_>>(), pick.map(|g| g.0));
+            eprintln!("qs {n} {:?} groups {:?} pick {:?} sure {sure}", qr, gs.iter().take(4).map(|x| (x.0, (x.1 * 100.0).round() / 100.0, (x.2 * 10.0).round() / 10.0, x.3)).collect::<Vec<_>>(), pick.map(|g| g.0));
         }
-        let Some(&&(g1, ..)) = pick else { continue };
+        let Some(&&(g1, ..)) = pick.or(only).or(cand.first()) else { continue };
         let Some(c) = (0..cells.len()).filter(|&i| group[i] == g1 && cells[i].count == n).min_by(|&a, &b| dl[a].total_cmp(&dl[b])).map(|i| &cells[i]) else { continue };
         let x0 = b.0 - nh * 0.35;
         let cand = |right: f32, top: f32, bottom: f32| {
@@ -418,9 +437,71 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
             .find(|&r| crate::quick_count(ocr, &crop_bgr(img, r.0 as usize, r.1 as usize, (r.0 + r.2) as usize, (r.1 + r.3) as usize)) == Some(n))
             .unwrap_or_else(|| cand(0.15, 0.15, 0.25));
         let near = |r: Rect| ((r.0 - qr.0).abs() as f32) < cs * 0.5 && ((r.1 - qr.1).abs() as f32) < cs * 0.5;
-        if !taken.iter().any(|&r| near(r)) {
-            taken.push(qr);
-            pairs.push(Pair { qs: Cell { rect: strip, count: n }, bag: c.clone(), cell: qr });
+        let p = Pair { qs: Cell { rect: strip, count: n }, bag: c.clone(), cell: qr, sure };
+        match pairs.iter().position(|q| near(q.cell)) {
+            None => pairs.push(p),
+            Some(j) if sure && !pairs[j].sure => pairs[j] = p,
+            Some(_) => {}
+        }
+    }
+    if pairs.len() >= 3 {
+        let dx = median(pairs.iter().map(|p| (p.qs.rect.0 - p.cell.0) as f32).collect()) as i32;
+        for p in pairs.iter_mut() {
+            if ((p.qs.rect.0 - p.cell.0 - dx) as f32).abs() > nh * 0.5 {
+                if debug {
+                    eprintln!("qs {} 數字那一條偏了 {:?} → x {}", p.qs.count, p.qs.rect, p.cell.0 + dx);
+                }
+                p.qs.rect.0 = p.cell.0 + dx;
+            }
+        }
+    }
+    let (Some(first), gx, gy) = (pairs.first().map(|p| p.cell), pxl.unwrap_or(px), pyb.unwrap_or(py)) else { return pairs };
+    let off = (pairs.iter().map(|p| p.qs.rect.0 - p.cell.0).min().unwrap_or(0), pairs.iter().map(|p| p.qs.rect.1 - p.cell.1).max().unwrap_or(0));
+    let (sw, sh) = (pairs.iter().map(|p| p.qs.rect.2).max().unwrap_or(0), pairs.iter().map(|p| p.qs.rect.3).max().unwrap_or(0));
+    let at = |r: Rect| (((r.0 - first.0) as f32 / gx).round() as i32, ((r.1 - first.1) as f32 / gy).round() as i32);
+    let idx: Vec<(i32, i32)> = pairs.iter().map(|p| at(p.cell)).collect();
+    let (cmin, cmax) = (idx.iter().map(|i| i.0).min().unwrap_or(0), idx.iter().map(|i| i.0).max().unwrap_or(0));
+    let (rmin, rmax) = (idx.iter().map(|i| i.1).min().unwrap_or(0), idx.iter().map(|i| i.1).max().unwrap_or(0));
+    let cols = if cmax - cmin >= 3 { cmin..=cmax } else { cmax - 3..=cmin + 3 };
+    let rows = if rmax > rmin { rmin..=rmax } else { rmin - 1..=rmin + 1 };
+    for r in rows {
+        for c in cols.clone() {
+            {
+                if idx.contains(&(c, r)) {
+                    continue;
+                }
+                let (l, t) = (first.0 as f32 + c as f32 * gx, first.1 as f32 + r as f32 * gy);
+                if l < x0 || l + first.2 as f32 > img.w as f32 || t < y0 || t + first.3 as f32 > y1 {
+                    continue;
+                }
+                let qr = (l.round() as i32, t.round() as i32, first.2, first.3);
+                let qc = cell_img(img, qr);
+                let qsig = sig(img, qr);
+                let dl: Vec<f32> = imgs.iter().map(|c| look(&qc, c)).collect();
+                let mut gs: Vec<(usize, f32, f32)> = vec![];
+                for (i, &g) in group.iter().enumerate() {
+                    let h = same_color(&qsig, &sigs[i]);
+                    match gs.iter_mut().find(|x| x.0 == g) {
+                        Some(x) => {
+                            x.1 = x.1.min(dl[i]);
+                            x.2 = x.2.min(h);
+                        }
+                        None => gs.push((g, dl[i], h)),
+                    }
+                }
+                gs.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let Some(&(g1, d1, h1)) = gs.first() else { continue };
+                let clear = d1 < 0.28 && gs.iter().skip(1).all(|g2| g2.1 - d1 >= 0.06 || (g2.1 - d1 >= 0.03 && g2.2 - h1 >= 0.3));
+                if debug {
+                    eprintln!("qs icon {qr:?} groups {:?} clear {clear}", gs.iter().take(3).map(|x| (x.0, (x.1 * 100.0).round() / 100.0, (x.2 * 10.0).round() / 10.0)).collect::<Vec<_>>());
+                }
+                if !clear {
+                    continue;
+                }
+                let Some(c) = (0..cells.len()).filter(|&i| group[i] == g1).min_by(|&a, &b| dl[a].total_cmp(&dl[b])).map(|i| &cells[i]) else { continue };
+                let strip = clamp_rect(((qr.0 + off.0) as f32, (qr.1 + off.1) as f32, (qr.0 + off.0 + sw) as f32, (qr.1 + off.1 + sh) as f32), img.w, img.h);
+                pairs.push(Pair { qs: Cell { rect: strip, count: c.count }, bag: c.clone(), cell: qr, sure: true });
+            }
         }
     }
     pairs
@@ -434,6 +515,32 @@ fn rec_zoom(ocr: &mut Ocr, img: &Bgr, r: (f32, f32, f32, f32), scale: f64) -> St
     let crop = crop_bgr(img, x0, y0, x1, y1);
     let big = resize_linear(&crop, (crop.w as f64 * scale) as usize, (crop.h as f64 * scale) as usize);
     ocr.run(&big, false, false).ok().and_then(|v| v.into_iter().next()).map_or(String::new(), |it| it.text)
+}
+
+fn gap_count(ocr: &mut Ocr, img: &Bgr, strip: (f32, f32, f32, f32)) -> Option<i64> {
+    let rec = number(&rec_zoom(ocr, img, strip, 3.0));
+    let det: Vec<i64> = read_region(ocr, img, (strip.0.max(0.0) as usize, strip.1.max(0.0) as usize, strip.2 as usize, strip.3 as usize), 3.0)
+        .iter()
+        .filter_map(|(it, _)| number(&it.text))
+        .collect();
+    let det = (det.len() == 1).then(|| det[0]);
+    let n = match (rec, det) {
+        (Some(r), Some(d)) if r != d && r.to_string().starts_with(&d.to_string()) => Some(d),
+        _ => rec.or(det),
+    };
+    let n = n.or_else(|| quick(ocr, img, strip));
+    if std::env::var_os("AUTO_DEBUG").is_some() {
+        eprintln!("  gap ({:.0},{:.0}) rec {rec:?} det {det:?} -> {n:?}", strip.0, strip.3);
+    }
+    n
+}
+
+fn quick(ocr: &mut Ocr, img: &Bgr, r: (f32, f32, f32, f32)) -> Option<i64> {
+    let r = clamp_rect(r, img.w, img.h);
+    if r.2 < 4 || r.3 < 4 {
+        return None;
+    }
+    crate::quick_count(ocr, &crop_bgr(img, r.0 as usize, r.1 as usize, (r.0 + r.2) as usize, (r.1 + r.3) as usize))
 }
 
 fn median(mut v: Vec<f32>) -> f32 {

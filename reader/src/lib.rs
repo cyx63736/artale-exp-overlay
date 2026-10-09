@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use tracker::util::{bag_count, fix_digits, parse_count, parse_exp, parse_meso};
 use tracker::OcrOut;
 
-pub const KS: [&str; 2] = ["hp", "mp"];
+pub use tracker::{KS, NP};
 
 pub trait Screen {
     fn grab(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<Bgr>;
@@ -198,8 +198,8 @@ pub struct Reader {
     pub engine: Ocr,
     pub fonts: HashMap<String, DigitFont>,
     pub fonts_path: Option<PathBuf>,
-    pub tpl_paths: [Option<PathBuf>; 2],
-    tpl_cache: [Option<(std::time::SystemTime, Tpl)>; 2],
+    pub tpl_paths: [Option<PathBuf>; NP],
+    tpl_cache: [Option<(std::time::SystemTime, Tpl)>; NP],
     seen: HashMap<String, (usize, usize, Vec<i16>, Option<String>)>,
     pub bag_id: i64,
     was_open: bool,
@@ -214,8 +214,8 @@ impl Reader {
             engine,
             fonts: HashMap::new(),
             fonts_path: None,
-            tpl_paths: [None, None],
-            tpl_cache: [None, None],
+            tpl_paths: Default::default(),
+            tpl_cache: Default::default(),
             seen: HashMap::new(),
             bag_id: 0,
             was_open: false,
@@ -361,7 +361,13 @@ impl Reader {
                 let new = f.learn(&bgr, &val, left);
                 let (resized, known) = (f.resized, f.known());
                 if resized {
-                    self.logs.push(format!("{}數字：字的大小變了（遊戲視窗調過大小？），照新的大小重新學", font_name(fname)));
+                    self.logs.push(format!("{}數字：字的大小變了（遊戲視窗調過大小？），改用這個大小的字", font_name(fname)));
+                    let p = std::env::temp_dir().join(format!("artale_font_{fname}.png"));
+                    let _ = ::image::RgbImage::from_fn(bgr.w as u32, bgr.h as u32, |x, y| {
+                        let i = (y as usize * bgr.w + x as usize) * 3;
+                        ::image::Rgb([bgr.data[i + 2], bgr.data[i + 1], bgr.data[i]])
+                    })
+                    .save(p);
                 }
                 if !new.is_empty() || resized {
                     self.save_fonts();
@@ -433,9 +439,9 @@ impl Reader {
         last
     }
 
-    fn load_tpls(&mut self) -> [bool; 2] {
-        let mut ok = [false; 2];
-        for k in 0..2 {
+    fn load_tpls(&mut self) -> [bool; NP] {
+        let mut ok = [false; NP];
+        for k in 0..NP {
             let Some(p) = self.tpl_paths[k].clone() else {
                 self.tpl_cache[k] = None;
                 continue;
@@ -459,11 +465,11 @@ impl Reader {
         ok
     }
 
-    pub fn read_inventory(&mut self, img: &Bgr) -> [Option<Vec<Option<i64>>>; 2] {
+    pub fn read_inventory(&mut self, img: &Bgr) -> [Option<Vec<Option<i64>>>; NP] {
         let ok = self.load_tpls();
         let (hh, ww) = (img.h, img.w);
-        let mut res: [Option<Vec<Option<i64>>>; 2] = [None, None];
-        for k in 0..2 {
+        let mut res: [Option<Vec<Option<i64>>>; NP] = Default::default();
+        for k in 0..NP {
             if !ok[k] {
                 continue;
             }
@@ -525,6 +531,52 @@ impl Reader {
         res
     }
 
+    #[doc(hidden)]
+    pub fn inventory_cells(&mut self, img: &Bgr) -> [Vec<(Bgr, f64)>; NP] {
+        let ok = self.load_tpls();
+        let (hh, ww) = (img.h, img.w);
+        let mut res: [Vec<(Bgr, f64)>; NP] = Default::default();
+        for k in 0..NP {
+            if !ok[k] {
+                continue;
+            }
+            let t = &self.tpl_cache[k].as_ref().unwrap().1;
+            let (cw, ch, bright, th, tw, sig) = (t.cw, t.ch, t.bright, t.top_h, t.top_w, t.sig);
+            if hh < th || ww < tw {
+                continue;
+            }
+            let img_blur = gaussian(img, sig);
+            let mut m = match_color(&img_blur, &t.blur);
+            let mut hits: Vec<(usize, usize)> = vec![];
+            while hits.len() < 80 {
+                let (mx, x, y) = max_loc(&m);
+                if mx < 0.6 {
+                    break;
+                }
+                let patch = crop_bgr(img, x, y, x + tw, y + th);
+                let patch_bright = patch.data.iter().map(|&v| v as f64).sum::<f64>() / patch.data.len() as f64;
+                if t.same_item(&crop_bgr(&img_blur, x, y, x + tw, y + th)) && (patch_bright - bright).abs() <= 20.0 && mx >= 0.8 {
+                    hits.push((x, y));
+                }
+                for yy in y.saturating_sub(th / 2)..(y + th / 2 + 1).min(m.h) {
+                    for xx in x.saturating_sub(tw / 2)..(x + tw / 2 + 1).min(m.w) {
+                        m.set(xx, yy, -1.0);
+                    }
+                }
+            }
+            hits.sort_by_key(|&(x, y)| (y, x));
+            for (x, y) in hits {
+                let (y0, y1) = (y + (ch as f64 * 0.45) as usize, hh.min(y + (ch as f64 * 1.05) as usize));
+                let cx0 = x.saturating_sub((cw as f64 * 0.2) as usize);
+                let cx1 = ww.min(x + (cw as f64 * 1.08) as usize);
+                if y0 < y1 && cx0 < cx1 {
+                    res[k].push((crop_bgr(img, cx0, y0, cx1, y1), (x - cx0) as f64));
+                }
+            }
+        }
+        res
+    }
+
     pub fn tick(&mut self, cfg: &Map<String, Value>, screen: &mut dyn Screen) -> (Option<OcrOut>, bool) {
         let mut out = OcrOut::default();
         let mut any = false;
@@ -548,7 +600,7 @@ impl Reader {
                 }
             }
         }
-        for k in 0..2 {
+        for k in 0..NP {
             if let Some([x, y, w, h]) = region(cfg, &format!("{}_region", KS[k])) {
                 any = true;
                 match screen.grab(x, y, w, h) {

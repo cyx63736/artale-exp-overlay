@@ -28,6 +28,19 @@ define_class!(
         fn can_become_main(&self) -> bool {
             false
         }
+
+        #[unsafe(method(becomeKeyWindow))]
+        fn become_key(&self) {
+            let _: () = unsafe { objc2::msg_send![super(self), becomeKeyWindow] };
+            let me = std::process::id() as i32;
+            let front = foreground() as i32;
+            if front != me {
+                if front > 0 {
+                    *PREV_APP.lock().unwrap() = Some(front);
+                }
+                NSApplication::sharedApplication(self.mtm()).activate();
+            }
+        }
     }
 );
 

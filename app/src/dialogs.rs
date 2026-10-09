@@ -7,7 +7,6 @@ use tracker::util::{bag_count, parse_count, parse_exp, parse_input, parse_meso};
 use tracker::Tracker;
 
 pub const SETTINGS_TITLE: &str = "經驗收益計算器設定";
-pub const RECORD_TITLE: &str = "記錄目前數值";
 
 const FIELDS: [(&str, &str); 6] = [
     ("hp_name", "紅水名稱"),
@@ -27,9 +26,17 @@ fn val_str(v: Option<&Value>) -> String {
     }
 }
 
+pub struct Extra {
+    k: usize,
+    name: String,
+    price: String,
+    bad: bool,
+}
+
 pub struct Settings {
     pub vals: Vec<String>,
     pub bad: Vec<bool>,
+    extras: Vec<Extra>,
     pub msg: String,
     pub alpha: f32,
     pub zoom: f32,
@@ -46,6 +53,10 @@ impl Settings {
         Settings {
             vals: FIELDS.iter().map(|(k, _)| val_str(t.cfg.get(*k))).collect(),
             bad: vec![false; FIELDS.len()],
+            extras: (2..tracker::NP)
+                .filter(|&k| !t.name(k).is_empty())
+                .map(|k| Extra { k, name: t.name(k), price: val_str(t.cfg.get(&format!("{}_price", tracker::KS[k]))), bad: false })
+                .collect(),
             msg: String::new(),
             alpha: t.cfg.get("alpha").and_then(|v| v.as_f64()).unwrap_or(0.88) as f32,
             zoom: 1.0,
@@ -55,36 +66,6 @@ impl Settings {
             numeric_focus: false,
             close_req: false,
             zoom_seen: 1.0,
-        }
-    }
-}
-
-pub struct Record {
-    pub vals: [String; 4],
-    pub bad: [bool; 4],
-    pub msg: String,
-    pub focus: bool,
-    prev_fg: Option<isize>,
-    pub pos: Option<(i32, i32)>,
-    pub size: egui::Vec2,
-    first: bool,
-    pub close_req: bool,
-    zoom_seen: f32,
-}
-
-impl Record {
-    pub fn new(_t: &Tracker, prev_fg: Option<isize>) -> Record {
-        Record {
-            vals: Default::default(),
-            bad: [false; 4],
-            msg: String::new(),
-            focus: true,
-            prev_fg,
-            pos: None,
-            size: egui::vec2(380.0, 260.0),
-            first: true,
-            zoom_seen: 1.0,
-            close_req: false,
         }
     }
 }
@@ -118,7 +99,7 @@ pub fn place_near(r: (i32, i32, i32, i32), size: (i32, i32), avoid: Option<(i32,
 }
 
 fn entry(ui: &mut egui::Ui, s: &mut String, width: f32, bad: bool, enabled: bool) -> egui::Response {
-    let stroke = if bad { egui::Stroke::new(2.0, HP) } else { egui::Stroke::new(1.0, LINE) };
+    let stroke = if bad { egui::Stroke::new(2.0_f32, HP) } else { egui::Stroke::new(1.0_f32, LINE) };
     egui::Frame::new()
         .stroke(stroke)
         .corner_radius(WIDGET_RADIUS)
@@ -140,16 +121,23 @@ fn small(text: &str, col: Color32) -> RichText {
     RichText::new(text).font(font(8.0)).color(col)
 }
 
-fn button(ui: &mut egui::Ui, text: &str, fill: Color32, fg: Color32, size: f32, pad: f32) -> bool {
+pub(crate) fn button(ui: &mut egui::Ui, text: &str, fill: Color32, fg: Color32, size: f32, pad: f32) -> bool {
     ui.add(egui::Button::new(RichText::new(text).font(bold(size)).color(fg)).fill(fill).corner_radius(WIDGET_RADIUS).min_size(egui::vec2(pad, 0.0)))
         .clicked()
 }
 
-fn region_label(o: &Overlay, k: &str) -> (String, bool) {
+fn region_label(o: &Overlay, k: &str) -> (String, Color32) {
+    let (txt, ok) = region_text(o, k);
+    if !ok && !o.t.has(&format!("{k}_region")) && pot_index(k).is_some_and(|i| i >= 2) {
+        return ("未設定（打開背包時算數量）".into(), MUTED);
+    }
+    (txt, if ok { GOOD } else { HP })
+}
+
+fn region_text(o: &Overlay, k: &str) -> (String, bool) {
     let t = &o.t;
     if let Some(p) = k.strip_suffix("_tpl") {
-        let i = if p == "hp" { 0 } else { 1 };
-        let ok = o.paths.tpl[i].exists();
+        let ok = pot_index(p).is_some_and(|i| o.paths.tpl[i].exists());
         return ((if ok { "已記住" } else { "未設定" }).into(), ok);
     }
     if k == "inv" {
@@ -165,8 +153,8 @@ fn region_label(o: &Overlay, k: &str) -> (String, bool) {
                 _ => parse_count(&raw).is_some(),
             };
         let shown = match k {
-            "hp" | "mp" => parse_count(&raw).map(|n| n.to_string()),
-            _ => None,
+            "exp" | "meso" => None,
+            _ => parse_count(&raw).map(|n| n.to_string()),
         };
         let txt = if raw.is_empty() {
             "已設定，讀取中…".to_string()
@@ -188,16 +176,6 @@ pub fn settings_window(o: &mut Overlay, ctx: &egui::Context, hwnd: isize) {
     }
 }
 
-pub fn record_window(o: &mut Overlay, ctx: &egui::Context, hwnd: isize) {
-    if let Some(mut r) = o.record.take() {
-        if record_ui(o, &mut r, ctx, hwnd) {
-            o.record = Some(r);
-        } else {
-            o.last_record_fg = r.prev_fg;
-        }
-    }
-}
-
 fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isize) -> bool {
     let ctx = ctx.clone();
     let rezoom = dialog_zoom(o, &ctx, &mut s.zoom_seen);
@@ -210,6 +188,9 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
     let mut save = false;
     let mut pick: Option<(usize, String, f64)> = None;
     let mut forget: Option<(usize, String)> = None;
+    let mut pick_x: Option<(usize, String, f64)> = None;
+    let mut drop_x: Option<usize> = None;
+    let mut add_x = false;
     let mut select: Option<String> = None;
     let mut auto = false;
     let mut clear: Option<String> = None;
@@ -222,6 +203,58 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
             let mut numeric_focus = false;
             egui::Grid::new("fields").num_columns(3).spacing([10.0, 4.0]).show(ui, |ui| {
                 for (i, (k, lab)) in FIELDS.iter().enumerate() {
+                    if i == 4 {
+                        let taken: Vec<String> =
+                            [&s.vals[0], &s.vals[2]].into_iter().cloned().chain(s.extras.iter().map(|e| e.name.clone())).map(|n| n.trim().to_string()).collect();
+                        let in_use: Vec<String> = o.t.ks().into_iter().map(|k| o.t.name(k)).collect();
+                        for (j, e) in s.extras.iter_mut().enumerate() {
+                            let col = pot_color(e.k);
+                            ui.label(small(&format!("其他藥水 {} 名稱", j + 1), col).font(font(9.0)));
+                            entry(ui, &mut e.name, 110.0, false, true);
+                            if e.name.chars().count() > NAME_MAX {
+                                e.name = e.name.chars().take(NAME_MAX).collect();
+                            }
+                            let cur = e.name.trim().to_string();
+                            let list: Vec<(String, f64)> =
+                                o.book.of(e.k).iter().filter(|p| p.name == cur || !taken.contains(&p.name)).map(|p| (p.name.clone(), p.price)).collect();
+                            egui::ComboBox::from_id_salt(("extra", j))
+                                .selected_text(RichText::new(if cur.is_empty() { "–".to_string() } else { disp(&cur) }).font(font(9.0)).color(INK))
+                                .width(110.0)
+                                .show_ui(ui, |ui| {
+                                    for (n, pr) in &list {
+                                        let on = *n == cur;
+                                        ui.horizontal(|ui| {
+                                            if ui.selectable_label(on, RichText::new(n).font(font(9.0))).on_hover_text("換成這瓶").clicked() {
+                                                pick_x = Some((j, n.clone(), *pr));
+                                            }
+                                            if !on && !in_use.contains(n) {
+                                                let x = egui::Button::new(RichText::new("×").font(font(8.0)).color(MUTED)).frame(false);
+                                                if ui.add(x).on_hover_text(format!("從清單刪掉{n}")).clicked() {
+                                                    forget = Some((e.k, n.clone()));
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label(small(&format!("其他藥水 {} 單價", j + 1), col).font(font(9.0)));
+                            if entry(ui, &mut e.price, 110.0, e.bad, true).has_focus() {
+                                numeric_focus = true;
+                            }
+                            if button(ui, "移除", PANEL, INK, 9.0, 0.0) {
+                                drop_x = Some(j);
+                            }
+                            ui.end_row();
+                        }
+                        if 2 + s.extras.len() < tracker::NP {
+                            ui.label("");
+                            if button(ui, "＋ 新增藥水", PANEL, INK, 9.0, 0.0) {
+                                add_x = true;
+                            }
+                            ui.label("");
+                            ui.end_row();
+                        }
+                    }
                     ui.label(small(lab, MUTED).font(font(9.0)));
                     let r = entry(ui, &mut s.vals[i], 110.0, s.bad[i], true);
                     if k.ends_with("_name") && s.vals[i].chars().count() > NAME_MAX {
@@ -275,20 +308,16 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
                 ui.end_row();
             });
             s.numeric_focus = numeric_focus;
-            let (hp, mp) = (o.t.name(0), o.t.name(1));
+            let ks = o.t.ks();
+            let tpl_keys: Vec<String> = ks.iter().map(|&k| format!("{}_tpl", potions::KIND[k])).collect();
+            let qs_items: Vec<(&str, String, Color32)> = ks.iter().map(|&k| (potions::KIND[k], format!("{} 數量", o.t.name(k)), pot_color(k))).collect();
+            let mut bag_items: Vec<(&str, String, Color32)> = vec![("inv", "背包範圍".into(), INK)];
+            bag_items.extend(ks.iter().zip(&tpl_keys).map(|(&k, key)| (key.as_str(), format!("背包裡一格{}", o.t.name(k)), pot_color(k))));
+            bag_items.push(("meso", "背包裡的楓幣數字".into(), EXP));
             let sections: [(&str, Option<&str>, Vec<(&str, String, Color32)>); 3] = [
                 ("自動讀取 EXP", None, vec![("exp", "下方 EXP 數字".into(), EXP)]),
-                ("藥水即時扣量（快捷欄上的數字）", None, vec![("hp", format!("{hp} 數量"), HP), ("mp", format!("{mp} 數量"), MP)]),
-                (
-                    "藥水總數校正（打開背包時自動讀取）",
-                    Some("請先打開背包、切到消耗欄，再按下面的「框選」"),
-                    vec![
-                        ("inv", "背包範圍".into(), INK),
-                        ("hp_tpl", format!("背包裡一格{hp}"), HP),
-                        ("mp_tpl", format!("背包裡一格{mp}"), MP),
-                        ("meso", "背包裡的楓幣數字".into(), EXP),
-                    ],
-                ),
+                ("藥水即時扣量（快捷欄上的數字）", None, qs_items),
+                ("藥水總數校正（打開背包時自動讀取）", Some("請先打開背包、切到消耗欄，再按下面的「框選」"), bag_items),
             ];
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -314,9 +343,9 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
                             if button(ui, "清除", PANEL, INK, 9.0, 0.0) {
                                 clear = Some(k.to_string());
                             }
-                            let (txt, ok) = region_label(o, k);
+                            let (txt, col) = region_label(o, k);
                             ui.add_space(4.0);
-                            ui.label(RichText::new(txt).font(mono(9.0, false)).color(if ok { GOOD } else { HP }));
+                            ui.label(RichText::new(txt).font(mono(9.0, false)).color(col));
                         });
                         ui.end_row();
                     }
@@ -352,6 +381,26 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
         s.vals[i + 1] = if pr == pr.trunc() { format!("{}", pr as i64) } else { format!("{pr}") };
         s.bad[i + 1] = false;
         apply(o, s, false);
+    }
+    if let Some((j, n, pr)) = pick_x {
+        let e = &mut s.extras[j];
+        e.name = n;
+        e.price = if pr == pr.trunc() { format!("{}", pr as i64) } else { format!("{pr}") };
+        e.bad = false;
+        apply(o, s, false);
+    }
+    if let Some(j) = drop_x {
+        s.extras.remove(j);
+        apply(o, s, false);
+    }
+    if add_x {
+        let rows: Vec<usize> = s.extras.iter().map(|e| e.k).collect();
+        let free = |k: &usize| !rows.contains(k);
+        let empty = |k: &usize| o.t.name(*k).is_empty();
+        let pick = (2..tracker::NP).filter(free).filter(empty).find(|&k| o.t.used(k) == 0);
+        if let Some(k) = pick.or_else(|| (2..tracker::NP).filter(free).find(empty)).or_else(|| (2..tracker::NP).find(free)) {
+            s.extras.push(Extra { k, name: String::new(), price: String::new(), bad: false });
+        }
     }
     if let Some((kk, n)) = forget {
         o.book.remove(kk, &n);
@@ -403,8 +452,33 @@ fn apply(o: &mut Overlay, s: &mut Settings, close: bool) -> bool {
             }
         }
     }
+    let mut extra_price: Vec<Option<f64>> = vec![];
+    for e in s.extras.iter_mut() {
+        e.bad = false;
+        extra_price.push(match parse_input(e.price.trim()) {
+            Ok(Some(n)) if n > 0.0 => Some(n),
+            Ok(None) => None,
+            _ => {
+                e.bad = !e.name.trim().is_empty();
+                any_bad |= e.bad;
+                None
+            }
+        });
+    }
     if any_bad && !close {
         s.msg = "紅框的數字看不懂（要大於 0，自動暫停可以填 0）。按 Shift 切成英數再打".into();
+        return false;
+    }
+    let mut seen: Vec<String> = vec![];
+    let mut dup = None;
+    for n in [&s.vals[0], &s.vals[2]].into_iter().chain(s.extras.iter().map(|e| &e.name)).map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        if seen.iter().any(|x| x == n) {
+            dup.get_or_insert(n.to_string());
+        }
+        seen.push(n.to_string());
+    }
+    if let (Some(n), false) = (&dup, close) {
+        s.msg = format!("{n}填了兩次，同一種藥水只要填一次");
         return false;
     }
     let newv = |key: &str| new.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()).or_else(|| o.t.cfg.get(key).cloned());
@@ -429,6 +503,24 @@ fn apply(o: &mut Overlay, s: &mut Settings, close: bool) -> bool {
         o.t.cfg.insert(k, v);
     }
     o.t.cfg.insert("names_ok".into(), true.into());
+    for k in (2..tracker::NP).filter(|_| dup.is_none()) {
+        let j = s.extras.iter().position(|e| e.k == k);
+        let name = j.map(|j| s.extras[j].name.trim().to_string()).unwrap_or_default();
+        let old = o.t.name(k);
+        if name.is_empty() {
+            o.remove_potion(k);
+            continue;
+        }
+        let typed = j.and_then(|j| extra_price[j]);
+        if name != old {
+            let price = typed.or_else(|| o.book.find(k, &name).map(|p| p.price)).unwrap_or(0.0);
+            o.switch_potion(k, &name, price, None, true);
+        } else if let Some(p) = typed {
+            let v: Value = if p == p.trunc() { (p as i64).into() } else { p.into() };
+            o.t.cfg.insert(format!("{}_price", potions::KIND[k]), v);
+            o.book.upsert(k, &name, p);
+        }
+    }
     for kk in 0..2 {
         let (name, price) = (o.t.name(kk), o.t.price(kk));
         o.book.upsert(kk, &name, price);
@@ -447,7 +539,7 @@ fn apply(o: &mut Overlay, s: &mut Settings, close: bool) -> bool {
     true
 }
 
-fn fit(ctx: &egui::Context, size: &mut egui::Vec2, want: egui::Vec2, force: bool) {
+pub(crate) fn fit(ctx: &egui::Context, size: &mut egui::Vec2, want: egui::Vec2, force: bool) {
     let want = want.ceil();
     if force || (want - *size).length() > 1.0 {
         *size = want;
@@ -455,7 +547,7 @@ fn fit(ctx: &egui::Context, size: &mut egui::Vec2, want: egui::Vec2, force: bool
     }
 }
 
-fn dialog_zoom(o: &Overlay, ctx: &egui::Context, seen: &mut f32) -> bool {
+pub(crate) fn dialog_zoom(o: &Overlay, ctx: &egui::Context, seen: &mut f32) -> bool {
     let z = o.dialog_zoom();
     if !ctx.input(|i| i.pointer.any_down()) && (ctx.zoom_factor() - z).abs() > 0.001 {
         ctx.set_zoom_factor(z);
@@ -465,118 +557,13 @@ fn dialog_zoom(o: &Overlay, ctx: &egui::Context, seen: &mut f32) -> bool {
     re
 }
 
-fn record_ui(o: &mut Overlay, r: &mut Record, ctx: &egui::Context, hwnd: isize) -> bool {
-    let ctx = ctx.clone();
-    let rezoom = dialog_zoom(o, &ctx, &mut r.zoom_seen);
-    if r.focus {
-        r.focus = false;
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
-        platform::force_focus(hwnd);
-    }
-    let close = std::mem::take(&mut r.close_req) || ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    let mut submit = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-    let exp_auto = o.t.has("exp_region");
-    let inv_ready = o.t.inv_ready(None);
-    let rows = [
-        ("EXP".to_string(), EXP),
-        ("EXP %".to_string(), EXP),
-        (format!("{} 總數", o.t.name(0)), HP),
-        (format!("{} 總數", o.t.name(1)), MP),
-    ];
-    let mut first_id: Option<egui::Id> = None;
-    let resp = egui::Area::new(egui::Id::new("dlg")).fixed_pos(egui::Pos2::ZERO).constrain(false).show(&ctx, |ui| {
-        egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
-            ui.style_mut().interaction.selectable_labels = false;
-            egui::Grid::new("rec").num_columns(3).spacing([10.0, 6.0]).show(ui, |ui| {
-                for (i, (lab, col)) in rows.iter().enumerate() {
-                    ui.label(RichText::new(lab).font(bold(10.0)).color(*col));
-                    let enabled = !(i < 2 && exp_auto);
-                    let resp = entry(ui, &mut r.vals[i], 180.0, r.bad[i], enabled);
-                    if enabled && first_id.is_none() {
-                        first_id = Some(resp.id);
-                    }
-                    if !enabled {
-                        ui.label(small("自動讀取中", MUTED));
-                    } else if i >= 2 && inv_ready {
-                        ui.label(small("開背包會自動讀", MUTED));
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-                }
-            });
-            let mut hint = "背包裡有好幾格就用 + 加起來，例如 3000+3000+1184\n空白的欄位會跳過。Enter 送出、Esc 取消。".to_string();
-            if !exp_auto && o.t.exp_last.is_some() && o.t.need.is_none() {
-                hint = format!("剛升級過，這次請把 EXP % 也填上\n{hint}");
-            }
-            ui.add_space(6.0);
-            ui.label(small(&hint, MUTED));
-            ui.label(RichText::new(&r.msg).font(bold(9.0)).color(HP));
-            ui.add_space(8.0);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                if button(ui, "記錄", MP, Color32::from_rgb(0x0b, 0x14, 0x26), 10.0, 60.0) {
-                    submit = true;
-                }
-            });
-        });
-    });
-    if r.first {
-        r.first = false;
-        if let Some(id) = first_id {
-            ctx.memory_mut(|m| m.request_focus(id));
-        }
-    }
-    ctx.output_mut(|out| out.ime = None);
-    fit(&ctx, &mut r.size, resp.response.rect.size(), rezoom);
-    if close {
-        return false;
-    }
-    if !submit {
-        return true;
-    }
-    let mut vals: [Option<f64>; 4] = [None; 4];
-    let mut any_bad = false;
-    for i in 0..4 {
-        if i < 2 && exp_auto {
-            continue;
-        }
-        match parse_input(&r.vals[i]) {
-            Ok(v) if i == 1 && v.map_or(false, |p| !(0.0..=100.0).contains(&p)) => {
-                r.bad[i] = true;
-                any_bad = true;
-            }
-            Ok(v) => {
-                r.bad[i] = false;
-                vals[i] = v;
-            }
-            Err(_) => {
-                r.bad[i] = true;
-                any_bad = true;
-            }
-        }
-    }
-    if any_bad {
-        r.msg = "紅框的數字看不懂。輸入法在中文模式的話，按 Shift 切成英數再打".into();
-        return true;
-    }
-    let round = |v: Option<f64>| v.map(|x| x.round_ties_even() as i64);
-    match o.t.submit_record(round(vals[0]), vals[1], [round(vals[2]), round(vals[3])]) {
-        Ok(()) => false,
-        Err(m) => {
-            r.bad[1] = true;
-            r.msg = m;
-            true
-        }
-    }
-}
-
 pub fn forget_potion(t: &mut Tracker, k: usize) {
     t.forget_potion(k);
 }
 
 pub fn clear_region(o: &mut Overlay, k: &str) {
     if let Some(p) = k.strip_suffix("_tpl") {
-        let i = if p == "hp" { 0 } else { 1 };
+        let i = pot_index(p).unwrap_or(0);
         let _ = std::fs::remove_file(&o.paths.tpl[i]);
         forget_potion(&mut o.t, i);
         let name = o.t.name(i);
@@ -589,8 +576,7 @@ pub fn clear_region(o: &mut Overlay, k: &str) {
         o.t.raw.insert(k.into(), String::new());
         o.save_cfg();
     }
-    if k == "hp" || k == "mp" {
-        let i = if k == "hp" { 0 } else { 1 };
+    if let Some(i) = pot_index(k) {
         o.t.forget_qs(i);
         o.watch[i].reset(None);
         o.watch[i].check = None;

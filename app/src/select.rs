@@ -36,15 +36,15 @@ pub fn window_rect(o: &Overlay) -> Option<(i32, i32, i32, i32)> {
 }
 
 fn names(o: &Overlay, kind: &str) -> (String, &'static str) {
-    let (hp, mp) = (o.t.name(0), o.t.name(1));
+    let name = |p: &str| pot_index(p).map(|k| o.t.name(k)).unwrap_or_default();
     match kind {
         "exp" => ("畫面下方的 EXP 數字（含 %）".into(), "只框數字那一行就好"),
-        "hp" => (format!("快捷欄上{hp}的數量"), "只框數字那一行就好"),
-        "mp" => (format!("快捷欄上{mp}的數量"), "只框數字那一行就好"),
         "inv" => ("整個背包的格子區域".into(), "框消耗欄範圍，涵蓋自定義的所有藥水"),
-        "hp_tpl" => (format!("背包裡「一格」{hp}"), "從圖示上緣框到數字下緣，左右框滿那一格"),
-        "mp_tpl" => (format!("背包裡「一格」{mp}"), "從圖示上緣框到數字下緣，左右框滿那一格"),
-        _ => ("背包下方的楓幣數字".into(), "只框數字那一行就好"),
+        "meso" => ("背包下方的楓幣數字".into(), "只框數字那一行就好"),
+        _ => match kind.strip_suffix("_tpl") {
+            Some(p) => (format!("背包裡「一格」{}", name(p)), "從圖示上緣框到數字下緣，左右框滿那一格"),
+            None => (format!("快捷欄上{}的數量", name(kind)), "只框數字那一行就好"),
+        },
     }
 }
 
@@ -81,7 +81,7 @@ pub fn step(o: &mut Overlay) {
     if let (Some((x, y, w, h)), Some((img, _))) = (res, &s.shot) {
         let (vx, vy, _, _) = s.virt;
         if let Some(p) = kind.strip_suffix("_tpl") {
-            let i = if p == "hp" { 0 } else { 1 };
+            let i = pot_index(p).unwrap_or(0);
             let (cx, cy) = ((x - vx).max(0) as usize, (y - vy).max(0) as usize);
             let (cw, ch) = ((w as usize).min(img.w - cx), (h as usize).min(img.h - cy));
             let crop = reader::cv::crop_bgr(img, cx, cy, cx + cw, cy + ch);
@@ -132,8 +132,7 @@ pub fn set_region(o: &mut Overlay, kind: &str, r: [i32; 4]) {
         o.t.pre_inc = None;
         o.t.rej_run = None;
     }
-    if kind == "hp" || kind == "mp" {
-        let i = if kind == "hp" { 0 } else { 1 };
+    if let Some(i) = pot_index(kind) {
         o.t.forget_qs(i);
         if o.names_ok() {
             let (n, pr) = (o.t.name(i), o.t.price(i));

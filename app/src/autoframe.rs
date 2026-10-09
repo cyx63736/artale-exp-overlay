@@ -11,6 +11,13 @@ pub struct AutoRun {
     start: f64,
     area: (i32, i32, i32, i32),
     sent: bool,
+    verify: Option<Verify>,
+}
+
+struct Verify {
+    k: usize,
+    pair: Pair,
+    crop: Option<Bgr>,
 }
 
 impl AutoRun {
@@ -22,8 +29,9 @@ impl AutoRun {
 pub struct AutoPick {
     pub pairs: Vec<Pair>,
     pub used: Vec<bool>,
-    crops: Vec<Bgr>,
+    crops: Vec<Option<Bgr>>,
     pub todo: Vec<usize>,
+    area: (i32, i32, i32, i32),
 }
 
 pub fn begin(o: &mut Overlay) {
@@ -32,7 +40,7 @@ pub fn begin(o: &mut Overlay) {
     }
     o.auto_pick = None;
     let area = o.hwnd_of(Kind::Overlay).map_or_else(platform::virtual_screen, platform::monitor_of);
-    o.auto = Some(AutoRun { start: o.now(), area, sent: false });
+    o.auto = Some(AutoRun { start: o.now(), area, sent: false, verify: None });
 }
 
 pub fn step(o: &mut Overlay) {
@@ -56,14 +64,17 @@ pub fn step(o: &mut Overlay) {
                 o.shared.wake();
                 o.t.say("自動框選中，請稍等…", 15.0);
             }
-            None => {
-                o.auto = None;
-                o.t.say("出錯了：截不到畫面", 10.0);
-            }
+            None => match o.auto.take().and_then(|a| a.verify) {
+                Some(v) => finish_pick(o, v.k, v.pair.qs.rect, v.crop.as_ref()),
+                None => o.t.say("出錯了：截不到畫面", 10.0),
+            },
         }
     } else if a.sent && now - a.start > 30.0 {
-        o.auto = None;
-        o.t.say("自動框選沒有完成，請再按一次，或手動框選", 10.0);
+        let a = o.auto.take().unwrap();
+        match a.verify {
+            Some(v) => finish_pick(o, v.k, v.pair.qs.rect, v.crop.as_ref()),
+            None => o.t.say("自動框選沒有完成，請再按一次，或手動框選", 10.0),
+        }
     }
 }
 
@@ -71,9 +82,21 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
     let Some(a) = o.auto.take() else { return };
     let (ax, ay) = (a.area.0, a.area.1);
     let off = |r: Rect| [r.0 + ax, r.1 + ay, r.2, r.3];
+    if let Some(v) = a.verify {
+        let now = f.pairs.iter().find(|p| same_slot(off(p.qs.rect), [v.pair.qs.rect.0, v.pair.qs.rect.1, v.pair.qs.rect.2, v.pair.qs.rect.3]));
+        match now {
+            Some(p) => {
+                let r = off(p.qs.rect);
+                let crop = bag_crop(&f, p, &img).or(v.crop);
+                finish_pick(o, v.k, (r[0], r[1], r[2], r[3]), crop.as_ref());
+            }
+            None => finish_pick(o, v.k, v.pair.qs.rect, v.crop.as_ref()),
+        }
+        return;
+    }
     let (mut got, mut miss): (Vec<String>, Vec<&str>) = (vec![], vec![]);
-    let mut mask = 0u8;
-    for (key, r, bit, name) in [("exp", f.exp, 8u8, "EXP"), ("inv", f.inv, 1, "背包"), ("meso", f.meso, 16, "楓幣")] {
+    let mut mask = 0u32;
+    for (key, r, bit, name) in [("exp", f.exp, 8u32, "EXP"), ("inv", f.inv, 1, "背包"), ("meso", f.meso, 16, "楓幣")] {
         match r {
             Some(r) => {
                 set_region(o, key, off(r));
@@ -83,11 +106,12 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
             None => miss.push(name),
         }
     }
-    let mut free = vec![true; f.pairs.len()];
-    let mut found: [Option<usize>; 2] = [None; 2];
-    let names = [o.t.name(0), o.t.name(1)];
-    let own: Vec<Option<Bgr>> = (0..2).map(|k| Bgr::load(&o.paths.tpl[k]).ok()).collect();
-    for k in 0..2 {
+    let mut free: Vec<bool> = f.pairs.iter().map(|p| p.sure).collect();
+    let ks = o.t.ks();
+    let mut found: [Option<usize>; tracker::NP] = [None; tracker::NP];
+    let names: [String; tracker::NP] = std::array::from_fn(|k| o.t.name(k));
+    let own: Vec<Option<Bgr>> = (0..tracker::NP).map(|k| ks.contains(&k).then(|| Bgr::load(&o.paths.tpl[k]).ok().filter(cell_like)).flatten()).collect();
+    for &k in &ks {
         let Some(t) = &own[k] else { continue };
         let best = (0..f.pairs.len()).filter(|&i| free[i]).filter_map(|i| tpl_match(t, &img, f.pairs[i].bag.rect).map(|d| (d, i))).min_by(|a, b| a.0.total_cmp(&b.0));
         if let Some((_, i)) = best {
@@ -95,8 +119,8 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
             found[k] = Some(i);
         }
     }
-    let others: Vec<(String, Bgr)> = o.book.tpl_files().into_iter().filter_map(|(_, n, p)| Some((n, Bgr::load(&p).ok()?))).collect();
-    for k in 0..2 {
+    let others: Vec<(String, Bgr)> = o.book.tpl_files().into_iter().filter_map(|(_, n, p)| Some((n, Bgr::load(&p).ok().filter(cell_like)?))).collect();
+    for &k in &ks {
         if found[k].is_some() {
             continue;
         }
@@ -110,18 +134,18 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
         }
     }
     let mut todo = vec![];
-    for k in 0..2 {
+    for &k in &ks {
         match found[k] {
             Some(i) => {
                 let crop = Some(cell(&img, f.pairs[i].bag.rect));
                 apply(o, k, off(f.pairs[i].qs.rect), crop.as_ref());
-                mask |= 1 << (k + 1);
+                mask |= pot_bit(k);
                 got.push(format!("{} 快捷欄", disp(&names[k])));
             }
             None => todo.push(k),
         }
     }
-    let mut left: Vec<usize> = (0..f.pairs.len()).filter(|&i| free[i]).collect();
+    let mut left: Vec<usize> = (0..f.pairs.len()).filter(|&i| free[i] || !f.pairs[i].sure).collect();
     left.sort_by(|&a, &b| {
         let (ra, rb) = (f.pairs[a].qs.rect, f.pairs[b].qs.rect);
         if (ra.1 - rb.1).abs() * 2 < ra.3.max(rb.3) { ra.0.cmp(&rb.0) } else { ra.1.cmp(&rb.1) }
@@ -132,18 +156,23 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
                 .iter()
                 .map(|&i| {
                     let mut p = f.pairs[i].clone();
-                    let r = off(p.qs.rect);
+                    let (r, c) = (off(p.qs.rect), off(p.cell));
                     p.qs.rect = (r[0], r[1], r[2], r[3]);
+                    p.cell = (c[0], c[1], c[2], c[3]);
                     p
                 })
                 .collect(),
             used: vec![false; left.len()],
-            crops: left.iter().map(|&i| cell(&img, f.pairs[i].bag.rect)).collect(),
+            crops: left.iter().map(|&i| bag_crop(&f, &f.pairs[i], &img)).collect(),
             todo: todo.clone(),
+            area: a.area,
         });
-    } else if !todo.is_empty() {
+    }
+    let lost = |k: usize| o.auto_pick.is_none() && todo.contains(&k);
+    if lost(0) || lost(1) {
         miss.push("快捷欄");
     }
+    let extra_lost: Vec<String> = ks.iter().filter(|&&k| k >= 2 && lost(k)).map(|&k| disp(&names[k])).collect();
     o.save_cfg();
     o.shared.wake();
     o.show_hint(mask);
@@ -161,6 +190,9 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
         if scrolled {
             msg += "\n找不到快捷欄：背包裡看不到快捷欄上的藥水，請把背包捲到藥水那幾格再試一次";
         }
+        if !extra_lost.is_empty() && !scrolled {
+            msg += &format!("\n找不到 {} 的快捷欄：有放在快捷欄的話請手動框選；沒放的話打開背包時會算數量", extra_lost.join("、"));
+        }
     }
     if o.auto_pick.is_some() {
         msg += "\n快捷欄的藥水請在上面選";
@@ -172,16 +204,28 @@ pub fn found(o: &mut Overlay, f: Found, img: Bgr) {
 pub fn pick(o: &mut Overlay, idx: usize) {
     let Some(p) = o.auto_pick.as_mut() else { return };
     let (Some(&k), Some(pair), Some(crop)) = (p.todo.first(), p.pairs.get(idx).cloned(), p.crops.get(idx).cloned()) else { return };
+    let area = p.area;
     p.used[idx] = true;
     p.todo.remove(0);
     if p.todo.is_empty() || p.used.iter().all(|&u| u) {
         o.auto_pick = None;
     }
-    let r = pair.qs.rect;
-    apply(o, k, [r.0, r.1, r.2, r.3], Some(&crop));
+    if o.auto.is_none() && o.select.is_none() {
+        o.auto = Some(AutoRun { start: o.now(), area, sent: false, verify: Some(Verify { k, pair, crop }) });
+    } else {
+        finish_pick(o, k, pair.qs.rect, crop.as_ref());
+    }
+}
+
+fn bag_crop(f: &Found, p: &Pair, img: &Bgr) -> Option<Bgr> {
+    (p.sure || f.cells.iter().filter(|c| c.count == p.bag.count).count() == 1).then(|| cell(img, p.bag.rect))
+}
+
+fn finish_pick(o: &mut Overlay, k: usize, r: Rect, crop: Option<&Bgr>) {
+    apply(o, k, [r.0, r.1, r.2, r.3], crop);
     o.save_cfg();
     o.shared.wake();
-    o.show_hint(1 << (k + 1));
+    o.show_hint(pot_bit(k));
     o.t.say(format!("已框選：{} 快捷欄", disp(&o.t.name(k))), 5.0);
 }
 
@@ -201,9 +245,13 @@ fn apply(o: &mut Overlay, k: usize, r: [i32; 4], crop: Option<&Bgr>) {
     } else {
         o.t.cfg.insert(format!("{}_screen", KIND[k]), crate::ui::region_tag(r).into());
     }
-    if let Some(c) = crop {
+    if let Some(c) = crop.filter(|c| cell_like(c)) {
         set_tpl(o, k, c);
     }
+}
+
+fn cell_like(c: &Bgr) -> bool {
+    c.w >= 8 && c.h >= 8 && c.w * 2 >= c.h && c.h * 2 >= c.w
 }
 
 fn cell(img: &Bgr, r: Rect) -> Bgr {
@@ -218,6 +266,13 @@ fn tpl_match(tpl: &Bgr, img: &Bgr, r: Rect) -> Option<f32> {
     }
     let a = reader::qs_sig(&crop_bgr(&c, 0, 0, c.w, c.h * 6 / 10));
     let b = reader::qs_sig(&crop_bgr(tpl, 0, 0, tpl.w, tpl.h * 6 / 10));
+    let color = reader::auto::same_color(&a, &b);
     let d = reader::auto::look(tpl, &c);
-    (reader::auto::same_color(&a, &b) < 0.35 && d < 0.22).then_some(d)
+    if color < 0.35 && d < 0.22 {
+        return Some(d);
+    }
+    let (ra, rb) = (tpl.w as f32 / tpl.h as f32, c.w as f32 / c.h as f32);
+    let stretched = (ra - rb).abs() > 0.1 * ra.max(rb);
+    let colorful = a.iter().sum::<f32>() >= 0.03 && b.iter().sum::<f32>() >= 0.03;
+    (stretched && colorful && color < 0.12).then_some(1.0 + color)
 }

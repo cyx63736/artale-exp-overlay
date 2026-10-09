@@ -1,4 +1,5 @@
-use crate::dialogs::{Record, Settings};
+use crate::dialogs::Settings;
+use crate::history::History;
 use crate::files::{self, Paths};
 use crate::platform::{self, Hotkey};
 use crate::potions::{self, Book, Check, Event, Prompt, Seen, Undo, Watch};
@@ -46,6 +47,26 @@ pub const MUTED: Color32 = Color32::from_rgb(0x8b, 0x95, 0xa8);
 pub const EXP: Color32 = Color32::from_rgb(0xf0, 0xc0, 0x50);
 pub const HP: Color32 = Color32::from_rgb(0xff, 0x6b, 0x61);
 pub const MP: Color32 = Color32::from_rgb(0x6e, 0xa2, 0xff);
+const EXTRA_COLORS: [Color32; 6] = [
+    Color32::from_rgb(0x4f, 0xd1, 0xc5),
+    Color32::from_rgb(0xb4, 0x8c, 0xff),
+    Color32::from_rgb(0xff, 0xa0, 0x5a),
+    Color32::from_rgb(0xff, 0x7e, 0xb6),
+    Color32::from_rgb(0xa3, 0xe6, 0x35),
+    Color32::from_rgb(0x67, 0xe8, 0xf9),
+];
+
+pub fn pot_color(k: usize) -> Color32 {
+    match k {
+        0 => HP,
+        1 => MP,
+        _ => EXTRA_COLORS[(k - 2) % EXTRA_COLORS.len()],
+    }
+}
+
+pub fn pot_index(key: &str) -> Option<usize> {
+    tracker::KS.iter().position(|k| *k == key)
+}
 pub const GOOD: Color32 = Color32::from_rgb(0x4f, 0xcf, 0x8f);
 pub const WARN: Color32 = Color32::from_rgb(0xff, 0xa2, 0x5c);
 
@@ -61,6 +82,14 @@ pub fn bold(p: f32) -> FontId {
 fn lbl_font(p: f32) -> FontId {
     FontId::new(pt(p), FontFamily::Name("lbl".into()))
 }
+pub fn colored(parts: &[(String, Color32)], f: FontId) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for (s, c) in parts {
+        job.append(s, 0.0, egui::TextFormat { font_id: f.clone(), color: *c, ..Default::default() });
+    }
+    job
+}
+
 pub fn mono(p: f32, b: bool) -> FontId {
     FontId::new(pt(p), FontFamily::Name(if b { "mono_bold" } else { "mono" }.into()))
 }
@@ -102,6 +131,11 @@ fn draw_icon(p: &egui::Painter, rect: egui::Rect, kind: &str, counting: bool, co
             let (d, n) = (egui::vec2(-a1.sin(), a1.cos()), egui::vec2(a1.cos(), a1.sin()));
             p.add(Shape::convex_polygon(vec![end + d * 3.4, end + n * 2.9 - d * 0.6, end - n * 2.9 - d * 0.6], col, Stroke::NONE));
         }
+        "rec" => {
+            p.line_segment([at(-6.0, -5.5), at(-6.0, 5.0)], st);
+            p.line_segment([at(-6.0, 5.0), at(6.0, 5.0)], st);
+            p.add(Shape::line(vec![at(-3.5, 2.0), at(-0.8, -1.2), at(1.6, 1.0), at(5.0, -4.0)], st));
+        }
         "compact" => {
             p.rect_stroke(Rect::from_min_max(at(-5.5, -4.0), at(5.5, 4.0)), 1.5, st, egui::StrokeKind::Middle);
             p.line_segment([at(-2.5, 0.0), at(2.5, 0.0)], st);
@@ -123,8 +157,9 @@ fn btn_hints() -> &'static [(&'static str, String)] {
     })
 }
 
-const BTN_HINTS_REST: [(&str, &str); 5] = [
+const BTN_HINTS_REST: [(&str, &str); 6] = [
     ("set", "設定：藥水價格、框選要自動讀取的位置"),
+    ("rec", "紀錄：每一筆的經驗、收益和走勢"),
     ("reset", "結束這一段：成績存進練功紀錄.csv，重新開始算（要連按兩下）"),
     ("compact", "切換精簡模式（只顯示一行）"),
     ("normal", "切換一般模式（顯示詳細內容）"),
@@ -149,7 +184,7 @@ pub struct Overlay {
     hotkey_msg: String,
     pub visible: bool,
     pub settings: Option<Settings>,
-    pub record: Option<Record>,
+    pub record: Option<History>,
     pub select: Option<Select>,
     size: egui::Vec2,
     last_pos: Option<(i32, i32)>,
@@ -158,8 +193,8 @@ pub struct Overlay {
     quit_armed: f64,
     pub last_record_fg: Option<isize>,
     pub book: Book,
-    pub watch: [Watch; 2],
-    pub hint: Option<(u8, f64)>,
+    pub watch: [Watch; tracker::NP],
+    pub hint: Option<(u32, f64)>,
     pub auto: Option<crate::autoframe::AutoRun>,
     pub auto_pick: Option<crate::autoframe::AutoPick>,
     scale: f64,
@@ -208,10 +243,30 @@ pub fn region_tag(r: [i32; 4]) -> String {
     platform::screen_tag(r[0] + r[2] / 2, r[1] + r[3] / 2)
 }
 
-pub const HINT_PICK: u8 = 10;
+pub const HINT_PICK: u8 = 20;
+
+pub fn pot_hint(k: usize) -> u8 {
+    if k < 2 { k as u8 + 1 } else { k as u8 + 3 }
+}
+
+pub fn pot_bit(k: usize) -> u32 {
+    1 << pot_hint(k)
+}
 
 const HINT_SEC: f64 = 5.0;
 pub const HINT: Color32 = Color32::from_rgb(0xff, 0x3b, 0x30);
+const PICK_COLORS: [Color32; 6] = [
+    Color32::from_rgb(0xff, 0x3b, 0x30),
+    Color32::from_rgb(0xff, 0x95, 0x00),
+    Color32::from_rgb(0x28, 0xb4, 0x4c),
+    Color32::from_rgb(0x0a, 0x84, 0xff),
+    Color32::from_rgb(0xaf, 0x52, 0xde),
+    Color32::from_rgb(0x1f, 0xa8, 0xb8),
+];
+
+pub fn pick_color(i: usize) -> Color32 {
+    PICK_COLORS[i % PICK_COLORS.len()]
+}
 
 #[derive(Clone)]
 pub enum PromptAct {
@@ -222,6 +277,7 @@ pub enum PromptAct {
     Done,
     AutoPick(usize),
     AutoSkip,
+    Sale(bool),
 }
 
 pub fn setup_ctx(ctx: &egui::Context) {
@@ -302,7 +358,7 @@ impl Overlay {
         if !self.names_ok() {
             return self;
         }
-        for k in 0..2 {
+        for k in self.t.ks() {
             let name = self.t.name(k);
             self.book.upsert(k, &name, self.t.price(k));
             if self.paths.tpl[k].exists() && self.book.find(k, &name).map_or(false, |p| p.tpl.is_none()) {
@@ -326,7 +382,7 @@ impl Overlay {
         let old = self.t.cfg.get("region_screen").and_then(|v| v.as_str()).map(|o| o != screen_key());
         let mut moved: Vec<String> = vec![];
         let mut fill = false;
-        for k in ["exp", "hp", "mp", "inv", "meso"] {
+        for k in ["exp", "inv", "meso"].into_iter().chain(self.t.ks().into_iter().map(|k| potions::KIND[k])) {
             let Some(r) = region_of(&self.t.cfg, k) else { continue };
             let now = region_tag(r);
             let key = format!("{k}_screen");
@@ -376,7 +432,7 @@ impl Overlay {
     }
 
     pub fn refresh_tpl(&mut self) {
-        self.t.tpl_exists = [self.paths.tpl[0].exists(), self.paths.tpl[1].exists()];
+        self.t.tpl_exists = std::array::from_fn(|k| self.paths.tpl[k].exists());
     }
 
     fn watch_ocr(&mut self, o: &tracker::OcrOut) {
@@ -391,8 +447,8 @@ impl Overlay {
             let r = w.check.as_ref().and_then(|c| c.from_sig.as_ref()).or(w.reference.as_ref());
             r.map_or(false, |r| potions::swapped(sig, r))
         };
-        let both = odd(0) && odd(1);
-        for k in 0..2 {
+        let both = self.t.ks().into_iter().filter(|&k| odd(k)).count() >= 2;
+        for k in self.t.ks() {
             let (Some(sig), Some(text)) = (&o.qs_sig[k], &o.qs[k]) else { continue };
             let Some(val) = parse_count(text) else { continue };
             let cells = if bag_open && self.t.tpl_exists[k] { o.inv.as_ref().and_then(|inv| inv[k].as_deref()) } else { None };
@@ -447,17 +503,20 @@ impl Overlay {
             prev_price: self.t.prev_price[k],
             session: self.t.session_no,
         };
-        self.book.upsert(k, &old, self.t.price(k));
-        if self.paths.tpl[k].exists() {
-            self.book.store_tpl(k, &old, &self.paths.tpl[k]);
-        }
+        let added = old.is_empty();
         let from_sig = self.watch[k].reference.clone();
-        if from_sig.is_some() {
-            self.book.set_qs(k, &old, from_sig.clone());
+        let here = region_of(&self.t.cfg, potions::KIND[k]);
+        if !added {
+            self.book.upsert(k, &old, self.t.price(k));
+            if self.paths.tpl[k].exists() {
+                self.book.store_tpl(k, &old, &self.paths.tpl[k]);
+            }
+            if from_sig.is_some() {
+                self.book.set_qs(k, &old, from_sig.clone());
+            }
+            self.book.keep_slot(k, &old, here);
         }
         let v0 = self.t.qs[k];
-        let here = region_of(&self.t.cfg, potions::KIND[k]);
-        self.book.keep_slot(k, &old, here);
         self.t.switch_potion(k, name, price, mark);
         self.book.upsert(k, name, price);
         let moved = if verify { self.book.find(k, name).and_then(|p| p.qs_at).filter(|&r| Some(r) != here) } else { None };
@@ -480,24 +539,64 @@ impl Overlay {
         w.reset(r);
         w.prompt = None;
         w.mark_hint = None;
-        w.check = if verify && moved.is_none() { Some(Check { t0: now, from_sig, v0, same: 0, changed: 0, undo }) } else { None };
-        if !has_tpl && self.t.has("inv_region") {
+        w.check = if verify && moved.is_none() && !added { Some(Check { t0: now, from_sig, v0, same: 0, changed: 0, undo }) } else { None };
+        if added {
+            if has_tpl || moved.is_some() {
+                self.t.say(format!("已新增{name}"), 4.0);
+            } else {
+                self.t.say(format!("已新增{name}，請打開背包按「自動框選」"), 12.0);
+            }
+        } else if !has_tpl && self.t.has("inv_region") {
             self.t.say(format!("已換成{name}，請打開背包按 ☰ 框選一次{name}"), 12.0);
         } else {
             self.t.say(format!("已換成{name}"), 4.0);
         }
-        self.show_hint(1 | 1 << (k + 1));
+        self.show_hint(1 | pot_bit(k));
     }
 
-    pub fn show_hint(&mut self, mask: u8) {
+    pub fn remove_potion(&mut self, k: usize) {
+        let old = self.t.name(k);
+        if k < 2 || old.is_empty() {
+            return;
+        }
+        let key = potions::KIND[k];
+        self.book.upsert(k, &old, self.t.price(k));
+        if self.paths.tpl[k].exists() {
+            self.book.store_tpl(k, &old, &self.paths.tpl[k]);
+        }
+        if let Some(sig) = self.watch[k].reference.clone() {
+            self.book.set_qs(k, &old, Some(sig));
+        }
+        if let Some(r) = region_of(&self.t.cfg, key) {
+            self.book.set_slot(k, &old, Some(r));
+        }
+        let price = self.t.price(k);
+        self.t.switch_potion(k, "", price, None);
+        self.t.cfg.insert(format!("{key}_region"), serde_json::Value::Null);
+        self.t.cfg.remove(&format!("{key}_screen"));
+        self.t.raw.remove(key);
+        let _ = std::fs::remove_file(&self.paths.tpl[k]);
+        self.refresh_tpl();
+        self.t.inv_msg.clear();
+        let w = &mut self.watch[k];
+        w.reset(None);
+        w.check = None;
+        w.prompt = None;
+        w.mark_hint = None;
+        self.book.save();
+        self.save_cfg();
+    }
+
+    pub fn show_hint(&mut self, mask: u32) {
         let now = self.now();
         let old = self.hint.filter(|h| now - h.1 < HINT_SEC).map_or(0, |h| h.0);
         self.hint = Some((old | mask, now));
     }
 
     pub fn hint_geom(&self, i: u8) -> Option<HintGeom> {
-        let ([x, y, w, h], text) = if i >= HINT_PICK {
-            let r = self.auto_pick.as_ref()?.pairs.get((i - HINT_PICK) as usize)?.qs.rect;
+        let pick = i >= HINT_PICK;
+        let ([x, y, w, h], text) = if pick {
+            let r = self.auto_pick.as_ref()?.pairs.get((i - HINT_PICK) as usize)?.cell;
             ([r.0, r.1, r.2, r.3], format!("{}", i - HINT_PICK + 1))
         } else {
             let (mask, t0) = self.hint?;
@@ -508,19 +607,24 @@ impl Overlay {
                 0 => ("inv", "背包".to_string()),
                 3 => ("exp", "EXP".to_string()),
                 4 => ("meso", "楓幣".to_string()),
-                _ => (potions::KIND[i as usize - 1], format!("{} 快捷欄", disp(&self.t.name(i as usize - 1)))),
+                _ => {
+                    let k = if i <= 2 { i as usize - 1 } else { i as usize - 3 };
+                    (potions::KIND[k], format!("{} 快捷欄", disp(&self.t.name(k))))
+                }
             };
             (region_of(&self.t.cfg, key)?, text)
         };
         let s = self.scale;
         let px = |p: f64| (p * s).round() as i32;
-        let (gap, bw) = (px(3.0), px(3.0).max(2));
-        let tw = px(text.chars().map(|c| if c.is_ascii() { 8.0 } else { 14.5 }).sum::<f64>() + 14.0);
-        let th = px(20.0);
+        let (gap, bw) = if pick { (0, px(2.0).max(2)) } else { (px(3.0), px(3.0).max(2)) };
+        let tw = if pick { px(text.len() as f64 * 7.0 + 8.0) } else { px(text.chars().map(|c| if c.is_ascii() { 8.0 } else { 14.5 }).sum::<f64>() + 14.0) };
+        let th = if pick { px(15.0) } else { px(20.0) };
         let tg = px(3.0);
         let (ox, oy, ow, oh) = (x - gap - bw, y - gap - bw, w + 2 * (gap + bw), h + 2 * (gap + bw));
         let (vx, vy, vw, _) = platform::virtual_screen();
-        let (tx, ty) = if i == 0 || i == 3 || i >= HINT_PICK {
+        let (tx, ty) = if pick {
+            (ox, oy)
+        } else if i == 0 || i == 3 {
             (ox, if oy - th - tg >= vy { oy - th - tg } else { oy + oh + tg })
         } else {
             (if ox - tw - tg >= vx || ox + ow + tg + tw > vx + vw { ox - tw - tg } else { ox + ow + tg }, oy)
@@ -533,7 +637,7 @@ impl Overlay {
             frame: (ox - left, oy - top, ow, oh),
             hole: (x - gap - left, y - gap - top, w + 2 * gap, h + 2 * gap),
             tab: (tx - left, ty - top, tw, th),
-            radius: px(6.0),
+            radius: if pick { px(4.0) } else { px(6.0) },
             text,
         })
     }
@@ -541,10 +645,11 @@ impl Overlay {
     fn hint_ui(&mut self, ctx: &egui::Context, i: u8) {
         let Some(g) = self.hint_geom(i) else { return };
         let ppp = ctx.pixels_per_point();
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(HINT)).show(ctx, |ui| {
+        let (fill, size) = if i >= HINT_PICK { (pick_color((i - HINT_PICK) as usize), 8.5) } else { (HINT, 10.0) };
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(fill)).show(ctx, |ui| {
             let (x, y, w, h) = g.tab;
             let r = egui::Rect::from_min_size(egui::pos2(x as f32 / ppp, y as f32 / ppp), egui::vec2(w as f32 / ppp, h as f32 / ppp));
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, &g.text, bold(10.0), Color32::WHITE);
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, &g.text, bold(size), Color32::WHITE);
         });
     }
 
@@ -589,7 +694,7 @@ impl Overlay {
 
     fn prompts(&self) -> Vec<(usize, String, Vec<(String, PromptAct, bool)>)> {
         let mut v = vec![];
-        for k in 0..2 {
+        for k in self.t.ks() {
             let name = self.t.name(k);
             match &self.watch[k].prompt {
                 Some(Prompt::GameChanged { suggest, .. }) => {
@@ -627,8 +732,15 @@ impl Overlay {
                 let mut btns: Vec<(String, PromptAct, bool)> =
                     (0..p.pairs.len()).filter(|&i| !p.used[i]).map(|i| (format!("{}", i + 1), PromptAct::AutoPick(i), false)).collect();
                 btns.push(("都不是".into(), PromptAct::AutoSkip, false));
-                v.push((k, format!("快捷欄有 {n} 種藥水，哪一格是{}？（看紅框旁的號碼）", disp(&self.t.name(k))), btns));
+                v.push((k, format!("快捷欄有 {n} 種藥水，哪一格是{}？（看同顏色的框）", disp(&self.t.name(k))), btns));
             }
+        }
+        if let Some(x) = self.t.sale_ask {
+            v.push((
+                0,
+                format!("暫停期間楓幣多了 {}，是賣掉落物賺的嗎？", short(Some(x as f64))),
+                vec![("是，算進收益".into(), PromptAct::Sale(true), true), ("不是，不算".into(), PromptAct::Sale(false), false)],
+            ));
         }
         v
     }
@@ -637,6 +749,10 @@ impl Overlay {
         match a {
             PromptAct::AutoPick(i) => crate::autoframe::pick(self, i),
             PromptAct::AutoSkip => crate::autoframe::skip(self),
+            PromptAct::Sale(yes) => {
+                self.t.answer_sale(yes);
+                self.t.save_state();
+            }
             PromptAct::Pick(name) => {
                 let mark = match self.watch[k].prompt {
                     Some(Prompt::GameChanged { mark, .. }) => Some(mark),
@@ -679,7 +795,9 @@ impl Overlay {
         self.hwnds = hwnds.to_vec();
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                Msg::Ready => self.t.ocr_msg = "讀取引擎就緒".into(),
+                Msg::Ready => {
+                    self.t.ocr_msg = "讀取引擎就緒".into();
+                }
                 Msg::Fatal(e) => {
                     files::log_error(&self.paths.err, &e);
                     self.t.ocr_msg = e.clone();
@@ -702,7 +820,9 @@ impl Overlay {
         }
         while let Ok(k) = self.hk.try_recv() {
             match k {
-                Hotkey::Pause => self.t.toggle_run(0.0),
+                Hotkey::Pause => {
+                    self.t.toggle_run(0.0)
+                }
                 Hotkey::Toggle => {
                     if self.select.is_some() {
                         continue;
@@ -746,7 +866,7 @@ impl Overlay {
             None => {
                 let fg = platform::foreground();
                 let mine = self.hwnds.iter().any(|(_, h)| *h == fg);
-                self.record = Some(Record::new(&self.t, if mine || fg == 0 { None } else { Some(fg) }));
+                self.record = Some(History::new(if mine || fg == 0 { None } else { Some(fg) }));
             }
         }
     }
@@ -939,8 +1059,8 @@ impl Overlay {
         } else if !t.running {
             msg = format!("按 ▶ 開始計時（{}）\n{msg}", platform::HOTKEY_NAMES[0]);
         }
-        for k in 0..2 {
-            if t.counting() && t.cap_since[k].map_or(false, |c| now - c > 300.0) {
+        for k in t.ks() {
+            if t.counting() && t.inv_ready(Some(k)) && t.cap_since[k].map_or(false, |c| now - c > 300.0) {
                 msg += &format!(
                     "\n{}快捷欄一直停在 {}，即時看不到用量，\n請打開背包更新",
                     disp(&t.name(k)),
@@ -992,6 +1112,7 @@ struct View {
     pairs: Vec<(String, Color32, String, String, Color32)>,
     ones: Vec<(String, Color32, String)>,
     earn_col: Color32,
+    earn_parts: Vec<(String, Color32)>,
     compact: Vec<(String, String, Color32)>,
     show_meso: bool,
 }
@@ -1030,8 +1151,12 @@ impl Overlay {
         let _ = bg;
         let r_hp = per(d(Some(cur.2 as f64), bh), dt);
         let r_mp = per(d(Some(cur.3 as f64), bm), dt);
+        let extras: Vec<usize> = t.ks().into_iter().filter(|&k| k >= 2).collect();
         let r_cost = match (bh, bm) {
-            (Some(h), Some(m)) => per(Some(t.span_cost(0, h as i64, t.used(0)) + t.span_cost(1, m as i64, t.used(1))), dt),
+            (Some(h), Some(m)) => {
+                let more: f64 = base.map_or(0.0, |b| extras.iter().map(|&k| t.span_cost(k, b.5[k], t.used(k))).sum());
+                per(Some(t.span_cost(0, h as i64, t.used(0)) + t.span_cost(1, m as i64, t.used(1)) + more), dt)
+            }
             _ => None,
         };
         let _ = (hp_p, mp_p);
@@ -1045,32 +1170,28 @@ impl Overlay {
             _ => None,
         };
         let exp_rates = (s.rate_recent.map(|r| r * unit / 3600.0), s.rate.map(|r| r * unit / 3600.0));
-        let mut rows: Vec<(&str, Option<f64>, Option<f64>)> = vec![
-            ("exp", exp_rates.0, exp_rates.1),
-            ("hp", r_hp, a_hp),
-            ("mp", r_mp, a_mp),
-            ("cost", r_cost, a_cost),
-            ("income", r_inc, a_inc),
-            ("profit", sub(r_inc, r_cost), sub(a_inc, a_cost)),
-        ];
+        let mut rows: Vec<(&str, Option<f64>, Option<f64>)> = vec![("exp", exp_rates.0, exp_rates.1), ("hp", r_hp, a_hp), ("mp", r_mp, a_mp)];
+        for &k in &extras {
+            rows.push((tracker::KS[k], per(d(Some(cur.5[k] as f64), base.map(|b| b.5[k] as f64)), dt), per(Some(t.used(k) as f64), a)));
+        }
+        rows.extend([("cost", r_cost, a_cost), ("income", r_inc, a_inc), ("profit", sub(r_inc, r_cost), sub(a_inc, a_cost))]);
         let rates = rows.clone();
+        let rate_of = |key: &str| rates.iter().find(|r| r.0 == key).and_then(|r| r.2);
         if early && t.running {
-            let actual = [
-                Some(t.gain as f64),
-                Some(t.used(0) as f64),
-                Some(t.used(1) as f64),
-                Some(s.cost),
-                s.income.map(|x| x as f64),
-                s.profit,
-            ];
-            for (i, r) in rows.iter_mut().enumerate() {
-                r.1 = actual[i];
+            for r in rows.iter_mut() {
+                r.1 = match r.0 {
+                    "exp" => Some(t.gain as f64),
+                    "cost" => Some(s.cost),
+                    "income" => s.income.map(|x| x as f64),
+                    "profit" => s.profit,
+                    k => pot_index(k).map(|i| t.used(i) as f64),
+                };
             }
         }
         let waiting = if t.running { "累積中" } else { "–" };
         let need = t.need.filter(|&n| n != 0.0);
         let fmt = |k: &str, col: usize, val: Option<f64>| -> String {
-            if col == 0 && early && t.running && (k == "hp" || k == "mp") {
+            if col == 0 && early && t.running && pot_index(k).is_some() {
                 if let Some(v) = val {
                     return comma_f(v);
                 }
@@ -1086,7 +1207,7 @@ impl Overlay {
                     }
                 }
                 Some(v) if k == "exp" => short(Some(v)) + &need.map_or(String::new(), |n| format!(" {:.2}%", v * 100.0 / n)),
-                Some(v) if k == "hp" || k == "mp" => {
+                Some(v) if pot_index(k).is_some() => {
                     if v < 10.0 {
                         format!("{v:.1}")
                     } else {
@@ -1099,11 +1220,13 @@ impl Overlay {
         let label = |k: &str| -> (String, Color32) {
             match k {
                 "exp" => ("EXP".into(), EXP),
-                "hp" => (disp(&t.name(0)), HP),
-                "mp" => (disp(&t.name(1)), MP),
                 "cost" => ("藥水花費".into(), HP),
-                "income" => ("撿錢".into(), EXP),
-                _ => ("淨收益".into(), GOOD),
+                "income" => ("撿錢".into(), GOOD),
+                "profit" => ("淨收益".into(), GOOD),
+                k => {
+                    let i = pot_index(k).unwrap_or(0);
+                    (disp(&t.name(i)), pot_color(i))
+                }
             }
         };
         let show_meso = t.has("meso_region");
@@ -1119,8 +1242,19 @@ impl Overlay {
         }
         let extra = if t.levelups > 0 { format!("  升{}級", t.levelups) } else { String::new() };
         let mut ones = vec![("本次獲得".to_string(), INK, format!("{}{extra}", comma(t.gain)))];
+        let mut earn_parts = vec![];
         let (earn, earn_col) = if let Some(p) = s.profit {
-            (format!("{}（撿到{}、藥水−{}）", short(Some(p)), short(s.income.map(|x| x as f64)), short(Some(s.cost))), if p >= 0.0 { GOOD } else { HP })
+            let col = if p >= 0.0 { GOOD } else { HP };
+            let mut ps = vec![(short(Some(p)), col), ("（撿到".to_string(), MUTED), (short(s.income.map(|x| x as f64)), GOOD)];
+            if s.sold > 0 {
+                ps.push(("、賣".into(), MUTED));
+                ps.push((short(Some(s.sold as f64)), GOOD));
+            }
+            ps.push(("、藥水".into(), MUTED));
+            ps.push((format!("−{}", short(Some(s.cost))), HP));
+            ps.push(("）".into(), MUTED));
+            earn_parts = ps;
+            (earn_parts.iter().map(|x| x.0.as_str()).collect::<String>(), col)
         } else if show_meso {
             (format!("藥水花了 {}（開背包讀楓幣後算收益）", short(Some(s.cost))), MUTED)
         } else {
@@ -1131,13 +1265,14 @@ impl Overlay {
         if let (Some((exp, _)), Some(n)) = (t.exp_last, need) {
             let rate = s.rate_recent.filter(|&r| r != 0.0).or(s.rate);
             lv_time = rate.filter(|&r| r > 0.0).map(|r| (n - exp as f64) / r * 3600.0);
-            lv_txt = format!("{}  {:.2}%", dur(lv_time), exp as f64 * 100.0 / n);
+            let lv = t.level().map_or(String::new(), |l| format!("{l}等  "));
+            lv_txt = format!("{lv}{}  {:.2}%", dur(lv_time), exp as f64 * 100.0 / n);
         } else if let Some((exp, _)) = t.exp_last {
             lv_txt = comma(exp);
         }
         ones.push(("預估升級".into(), MP, lv_txt));
-        for k in 0..2 {
-            let hr = if k == 0 { s.hp_hr } else { s.mp_hr };
+        for k in t.ks() {
+            let hr = if a / 3600.0 > 0.005 { Some(t.used(k) as f64 / (a / 3600.0)) } else { None };
             let txt = if let Some(left) = t.est_total(k) {
                 comma(left) + &hr.filter(|&h| h != 0.0).map_or(String::new(), |h| format!("  預計可用 {}", dur(Some(left as f64 / h * 3600.0))))
             } else if let Some(q) = t.qs[k] {
@@ -1145,14 +1280,14 @@ impl Overlay {
             } else {
                 "–".into()
             };
-            ones.push((format!("{}剩", disp(&t.name(k))), if k == 0 { HP } else { MP }, txt));
+            ones.push((format!("{}剩", disp(&t.name(k))), pot_color(k), txt));
         }
         let mut compact = vec![
             ("累積EXP".to_string(), short(Some(t.gain as f64)), EXP),
-            ((if unit == 600.0 { "每十分" } else { "每小時" }).to_string(), short(rates[0].2), EXP),
-            ("藥水花費".to_string(), short(rates[3].2), EXP),
+            ((if unit == 600.0 { "每十分" } else { "每小時" }).to_string(), short(rate_of("exp")), EXP),
+            ("藥水花費".to_string(), short(rate_of("cost")), EXP),
         ];
-        if let Some(p) = rates[5].2 {
+        if let Some(p) = rate_of("profit") {
             compact.push(("淨收益".to_string(), short(Some(p)), if p < 0.0 { HP } else { GOOD }));
         }
         compact.push(("預估升級".to_string(), dur(lv_time), EXP));
@@ -1173,6 +1308,7 @@ impl Overlay {
             pairs,
             ones,
             earn_col,
+            earn_parts,
             compact,
             show_meso,
         }
@@ -1281,7 +1417,7 @@ impl Overlay {
             return v;
         }
         let picks = self.auto_pick.as_ref().map_or(0, |p| p.pairs.len() as u8);
-        for i in (0..5).chain(HINT_PICK..HINT_PICK + picks).filter(|_| overlay.is_some()) {
+        for i in (0..=pot_hint(tracker::NP - 1)).chain(HINT_PICK..HINT_PICK + picks).filter(|_| overlay.is_some()) {
             if let Some(g) = self.hint_geom(i) {
                 v.push(Spec { kind: Kind::Hint(i), title: "讀取範圍", pos: g.pos, size: (g.size.0 as u32, g.size.1 as u32), decorations: false });
             }
@@ -1297,7 +1433,7 @@ impl Overlay {
         if let Some(r) = &mut self.record {
             let size = ((r.size.x as f64 * scale) as i32, (r.size.y as f64 * scale) as i32);
             let pos = *r.pos.get_or_insert_with(|| crate::dialogs::place_near(orect, size, srect));
-            v.push(Spec { kind: Kind::Record, title: crate::dialogs::RECORD_TITLE, pos, size: (size.0 as u32, size.1 as u32), decorations: true });
+            v.push(Spec { kind: Kind::Record, title: crate::history::TITLE, pos, size: (size.0 as u32, size.1 as u32), decorations: true });
         }
         v
     }
@@ -1349,7 +1485,7 @@ impl Overlay {
         match kind {
             Kind::Overlay => self.overlay_ui(ctx, hwnd),
             Kind::Settings => crate::dialogs::settings_window(self, ctx, hwnd),
-            Kind::Record => crate::dialogs::record_window(self, ctx, hwnd),
+            Kind::Record => crate::history::window(self, ctx, hwnd),
             Kind::Select => crate::select::select_window(self, ctx),
             Kind::Hint(i) => self.hint_ui(ctx, i),
         }
@@ -1413,7 +1549,7 @@ impl Overlay {
                     let tr = ui.label(RichText::new(&v.timer).font(mono(15.0, true)).color(INK));
                     ui.painter().circle_filled(egui::pos2(dot_x, tr.rect.center().y - ICON_DY), 3.2, v.dot);
                     ui.add_space(10.0);
-                    for k in ["run", "set", "reset", "compact", "close"] {
+                    for k in ["run", "set", "rec", "reset", "compact", "close"] {
                         let armed = k == "reset" && self.t.reset_armed > 0.0;
                         let id = ui.next_auto_id();
                         let hovered = ui.ctx().read_response(id).map_or(false, |r| r.hovered());
@@ -1493,8 +1629,12 @@ impl Overlay {
                     egui::Grid::new("ones").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
                         for (name, col, txt) in &v.ones {
                             ui.label(RichText::new(name).font(lbl_font(9.0)).color(MUTED));
-                            let c = if name == "本次收益" { v.earn_col } else { *col };
-                            ui.label(RichText::new(txt).font(mono(11.0, true)).color(c));
+                            if name == "本次收益" && !v.earn_parts.is_empty() {
+                                ui.label(colored(&v.earn_parts, mono(11.0, true)));
+                            } else {
+                                let c = if name == "本次收益" { v.earn_col } else { *col };
+                                ui.label(RichText::new(txt).font(mono(11.0, true)).color(c));
+                            }
                             ui.end_row();
                         }
                     });
@@ -1507,9 +1647,11 @@ impl Overlay {
                         for row in btns.chunks(4) {
                             ui.horizontal(|ui| {
                                 for (lab, a, hi) in row {
-                                    let b = egui::Button::new(RichText::new(lab).font(font(9.0)).color(if *hi { BG } else { INK }))
-                                        .fill(if *hi { WARN } else { LINE })
-                                        .corner_radius(2.0);
+                                    let b = match a {
+                                        PromptAct::AutoPick(i) => egui::Button::new(RichText::new(lab).font(bold(9.0)).color(Color32::WHITE)).fill(pick_color(*i)).min_size(egui::vec2(24.0, 0.0)),
+                                        _ => egui::Button::new(RichText::new(lab).font(font(9.0)).color(if *hi { BG } else { INK })).fill(if *hi { WARN } else { LINE }),
+                                    }
+                                    .corner_radius(2.0);
                                     if ui.add(b).clicked() {
                                         pact = Some((*k, a.clone()));
                                     }
@@ -1545,9 +1687,14 @@ impl Overlay {
             self.prompt_action(k, a);
         }
         match act {
-            Some("run") => self.t.toggle_run(0.0),
+            Some("run") => {
+                self.t.toggle_run(0.0)
+            }
             Some("set") => self.open_settings(),
-            Some("reset") => self.t.ask_reset(),
+            Some("rec") => self.open_record(),
+            Some("reset") => {
+                self.t.ask_reset()
+            }
             Some("compact") => {
                 let c = !compact;
                 self.t.cfg.insert("compact".into(), c.into());

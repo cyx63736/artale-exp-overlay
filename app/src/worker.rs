@@ -81,7 +81,7 @@ pub fn spawn(paths: Paths, shared: Arc<Shared>, tx: Sender<Msg>, repaint: impl F
         platform::below_normal_priority();
         let mut rd = reader::Reader::new(engine);
         rd.fonts_path = Some(paths.digits.clone());
-        rd.tpl_paths = [Some(paths.tpl[0].clone()), Some(paths.tpl[1].clone())];
+        rd.tpl_paths = std::array::from_fn(|k| Some(paths.tpl[k].clone()));
         rd.load_fonts();
         #[cfg(target_os = "macos")]
         if !ocr::capture::has_permission() {

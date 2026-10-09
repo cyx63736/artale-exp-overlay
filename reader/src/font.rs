@@ -145,25 +145,52 @@ pub struct DigitFont {
     pub bad: u32,
     pub reads: u64,
     pub resized: bool,
+    pub active_h: usize,
+    pub recent: Vec<usize>,
 }
 
 pub const MAX_PER: usize = 4;
 pub const MIN_H: usize = 16;
+pub const MAX_SIZES: usize = 3;
 
 fn pround(v: f64) -> i64 {
     v.round_ties_even() as i64
 }
 
+pub fn near(a: usize, b: usize) -> bool {
+    (a as f64 - b as f64).abs() <= 0.15 * a.max(b) as f64
+}
+
 impl DigitFont {
     pub fn new(punct: bool) -> Self {
-        DigitFont { glyphs: vec![], punct, bad: 0, reads: 0, resized: false }
+        DigitFont { glyphs: vec![], punct, bad: 0, reads: 0, resized: false, active_h: 0, recent: vec![] }
     }
 
-    pub fn known(&self) -> String {
-        let mut v: Vec<char> = self.glyphs.iter().map(|g| g.ch).collect();
+    pub fn sizes(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = vec![];
+        for g in &self.glyphs {
+            if !v.iter().any(|&h| near(h, g.t.h)) {
+                v.push(g.t.h);
+            }
+        }
+        v.sort_by_key(|&h| (!near(h, self.active_h), h));
+        v
+    }
+
+    fn known_in(&self, hb: usize) -> String {
+        let mut v: Vec<char> = self.glyphs.iter().filter(|g| hb == 0 || near(g.t.h, hb)).map(|g| g.ch).collect();
         v.sort();
         v.dedup();
         v.into_iter().collect()
+    }
+
+    pub fn known(&self) -> String {
+        self.known_in(self.active_h)
+    }
+
+    pub fn pick_active(&mut self) {
+        let best = self.sizes().into_iter().max_by_key(|&h| (self.known_in(h).len(), self.glyphs.iter().filter(|g| near(g.t.h, h)).count()));
+        self.active_h = best.unwrap_or(0);
     }
 
     pub fn learn(&mut self, bgr: &Bgr, text: &str, left: f64) -> String {
@@ -215,8 +242,9 @@ impl DigitFont {
             }
             new.push(Glyph { ch, t: g.crop(a0, b0, a1, b1), m, pl: sx0 - a0, pr: a1 - sx1 });
         }
-        let th = new[0].t.h as f64;
-        let same_size = |gg: &Glyph| (gg.t.h as f64 - th).abs() <= 0.15 * th;
+        let th = new[0].t.h;
+        let hb = self.sizes().into_iter().find(|&h| near(h, th)).unwrap_or(th);
+        let same_size = |gg: &Glyph| near(gg.t.h, hb);
         let mut added: Vec<char> = vec![];
         for gl in new {
             if self.glyphs.iter().filter(|gg| gg.ch == gl.ch && same_size(gg)).count() >= MAX_PER {
@@ -232,28 +260,42 @@ impl DigitFont {
             added.push(gl.ch);
             self.glyphs.push(gl);
         }
-        let old = self.glyphs.len();
-        let mut chars: Vec<char> = self.glyphs.iter().filter(|g| same_size(g)).map(|g| g.ch).collect();
-        chars.sort();
-        chars.dedup();
-        if chars.len() >= 6 {
-            self.glyphs.retain(|g| same_size(g));
+        self.recent.push(hb);
+        if self.recent.len() > 8 {
+            self.recent.remove(0);
         }
-        self.resized = self.glyphs.len() < old;
+        self.resized = false;
+        if !near(hb, self.active_h) && self.known_in(hb).len() >= 6 {
+            let votes = self.recent.iter().filter(|&&h| near(h, hb)).count();
+            if self.active_h == 0 || votes >= 6 {
+                self.resized = self.active_h != 0;
+                self.active_h = hb;
+            }
+        }
+        while self.sizes().len() > MAX_SIZES {
+            let drop = self.sizes().into_iter().filter(|&h| !near(h, self.active_h)).min_by_key(|&h| self.glyphs.iter().filter(|g| near(g.t.h, h)).count());
+            let Some(h) = drop else { break };
+            self.glyphs.retain(|g| !near(g.t.h, h));
+        }
         added.sort();
         added.dedup();
         added.into_iter().collect()
     }
 
     pub fn read(&self, bgr: &Bgr, left: f64) -> Option<String> {
-        let thr = 0.8f32;
         let g = gray_f32(bgr);
+        let full = |h: usize| near(h, self.active_h) || "0123456789".chars().all(|c| self.known_in(h).contains(c));
+        self.sizes().into_iter().filter(|&h| full(h)).find_map(|h| self.read_size(bgr, &g, left, h))
+    }
+
+    fn read_size(&self, bgr: &Bgr, g: &Plane<f32>, left: f64, hb: usize) -> Option<String> {
+        let thr = 0.8f32;
         let mut cands: Vec<Cand> = vec![];
         for (gi, gl) in self.glyphs.iter().enumerate() {
-            if g.h < gl.t.h || g.w < gl.t.w {
+            if !near(gl.t.h, hb) || g.h < gl.t.h || g.w < gl.t.w {
                 continue;
             }
-            let mut r = match_masked(&g, &gl.t, &gl.m);
+            let mut r = match_masked(g, &gl.t, &gl.m);
             let (th, tw) = (gl.t.h, gl.t.w);
             for _ in 0..12 {
                 let (mx, px, py) = max_loc(&r);
@@ -453,6 +495,7 @@ pub fn fonts_from_json(v: &Value) -> Vec<(String, DigitFont)> {
                 pr: g["pr"].as_u64().unwrap_or(0) as usize,
             });
         }
+        f.pick_active();
         out.push((k.clone(), f));
     }
     out
