@@ -306,6 +306,16 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
                     }
                 });
                 ui.end_row();
+                ui.label(small("打王模式", MUTED).font(font(9.0)));
+                let mut on = crate::boss::enabled(&o.t.cfg);
+                if ui.checkbox(&mut on, RichText::new("算傷害和預估時間（組隊只能算整隊傷害）").font(font(9.0)).color(INK)).changed() {
+                    o.t.cfg.insert("boss_mode".into(), on.into());
+                    if !on {
+                        o.boss = Default::default();
+                    }
+                    o.save_cfg();
+                }
+                ui.end_row();
             });
             s.numeric_focus = numeric_focus;
             let ks = o.t.ks();

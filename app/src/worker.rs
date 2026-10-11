@@ -13,6 +13,7 @@ pub enum Msg {
     Ocr(OcrOut),
     Logs(Vec<String>),
     Auto(Box<reader::auto::Found>, Box<ocr::img::Bgr>),
+    Boss(crate::boss::Out),
 }
 
 pub struct Shared {
@@ -93,6 +94,7 @@ pub fn spawn(paths: Paths, shared: Arc<Shared>, tx: Sender<Msg>, repaint: impl F
         let mut screen = GdiScreen(None, 0);
         send(Msg::Ready);
         let mut fast = 0u32;
+        let mut boss = crate::boss::Watcher::default();
         loop {
             let pending = shared.auto.lock().unwrap().take();
             if let Some(img) = pending {
@@ -146,6 +148,12 @@ pub fn spawn(paths: Paths, shared: Arc<Shared>, tx: Sender<Msg>, repaint: impl F
                     false
                 }
             };
+            #[cfg(any(windows, target_os = "macos"))]
+            if crate::boss::enabled(&cfg) {
+                if let Ok(Some(m)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| boss.tick(&cfg, &mut rd.engine, &mut screen))) {
+                    send(Msg::Boss(m));
+                }
+            }
             fast = if bag { fast + 1 } else { 0 };
             let ocr_sec = cfg.get("ocr_sec").and_then(|v| v.as_f64()).unwrap_or(3.0);
             let delay = if fast > 0 && fast <= 12 { 0.4 } else { ocr_sec.max(1.0) };

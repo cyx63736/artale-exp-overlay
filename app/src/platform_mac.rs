@@ -450,6 +450,18 @@ pub fn monitor_of(hwnd: isize) -> (i32, i32, i32, i32) {
         })
 }
 
+pub fn monitor_at(x: i32, y: i32) -> (i32, i32, i32, i32) {
+    let s = scale();
+    let (px, py) = (x as f64 / s, y as f64 / s);
+    ocr::capture::screens()
+        .iter()
+        .map(|(_, b)| b)
+        .find(|b| px >= b.origin.x && px < b.origin.x + b.size.width && py >= b.origin.y && py < b.origin.y + b.size.height)
+        .map_or_else(primary_screen, |b| {
+            ((b.origin.x * s).round() as i32, (b.origin.y * s).round() as i32, (b.size.width * s).round() as i32, (b.size.height * s).round() as i32)
+        })
+}
+
 pub fn screen_tag(x: i32, y: i32) -> String {
     let s = scale();
     let (px, py) = (x as f64 / s, y as f64 / s);

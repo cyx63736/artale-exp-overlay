@@ -202,6 +202,7 @@ pub struct Overlay {
     bad_since: Option<f64>,
     bad_hold: f64,
     screen_warned: Option<String>,
+    pub boss: crate::boss::Boss,
 }
 
 pub struct HintGeom {
@@ -350,6 +351,7 @@ impl Overlay {
             bad_since: None,
             bad_hold: 0.0,
             screen_warned: None,
+            boss: Default::default(),
         }
         .init_book()
     }
@@ -809,6 +811,7 @@ impl Overlay {
                 }
                 Msg::Logs(l) => files::log_detail(&self.paths.detail, &l),
                 Msg::Auto(f, img) => crate::autoframe::found(self, *f, *img),
+                Msg::Boss(b) => crate::boss::on_msg(self, b),
                 Msg::Ocr(o) => {
                     self.t.on_ocr(&o);
                     self.watch_ocr(&o);
@@ -1495,6 +1498,7 @@ impl Overlay {
         let ctx = ctx.clone();
         self.last_tick = self.now();
         let v = self.view();
+        let boss_rows = crate::boss::rows(self);
         let alpha = self.t.cfg.get("alpha").and_then(|x| x.as_f64()).unwrap_or(0.88) as f32;
         let zoom = self.zoom();
         if (ctx.zoom_factor() - zoom).abs() > 0.001 {
@@ -1580,6 +1584,20 @@ impl Overlay {
                         }
                     }
                 });
+                if !boss_rows.is_empty() {
+                    ui.add_space(6.0);
+                    egui::Grid::new("boss").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
+                        for (name, col, txt) in &boss_rows {
+                            ui.label(RichText::new(name).font(lbl_font(9.0)).color(MUTED));
+                            ui.label(RichText::new(txt).font(mono(11.0, true)).color(*col));
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(4.0);
+                    let w = ui.min_rect().width().max(200.0);
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), Sense::hover());
+                    ui.painter().rect_filled(r, 0.0, LINE);
+                }
                 if compact {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {

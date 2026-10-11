@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod autoframe;
+mod boss;
 mod dialogs;
 mod files;
 mod history;
