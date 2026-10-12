@@ -110,6 +110,269 @@ pub fn load_curves(csv: &Path) -> HashMap<String, Vec<CurvePt>> {
     m
 }
 
+pub const BOSS_FILE: &str = "打王紀錄.csv";
+pub const BOSS_CURVE_FILE: &str = "打王曲線.jsonl";
+pub const BOSS_HEAD: [&str; 8] = ["時間", "王", "總血量", "開始%", "已用（秒）", "傷害", "每秒傷害", "DPM"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BossRec {
+    pub when: String,
+    pub name: String,
+    pub max: i64,
+    pub secs: f64,
+    pub dmg: i64,
+    pub dpm: f64,
+    pub start: f64,
+}
+
+pub fn parse_boss(line: &str) -> Option<BossRec> {
+    let c: Vec<&str> = line.trim_end_matches(['\r', '\n']).split(',').map(|s| s.trim().trim_matches('"')).collect();
+    if c.len() < 8 || c[0].len() < 16 || !c[0].as_bytes()[0].is_ascii_digit() {
+        return None;
+    }
+    Some(BossRec {
+        when: c[0].to_string(),
+        name: c[1].to_string(),
+        max: c[2].parse().ok()?,
+        secs: c[4].parse().ok()?,
+        dmg: c[5].parse().ok()?,
+        dpm: c[7].parse().ok()?,
+        start: secs_of(c[0]),
+    })
+}
+
+fn secs_of(when: &str) -> f64 {
+    let d = days_of(when.get(..10).unwrap_or("")).unwrap_or(0) as f64;
+    let n = |a: usize, b: usize| when.get(a..b).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+    d * 86400.0 + n(11, 13) * 3600.0 + n(14, 16) * 60.0 + n(17, 19)
+}
+
+const PHASE_GAP: f64 = 600.0;
+const RAID_GAP: f64 = 90.0;
+const MAX_PHASES: usize = 6;
+
+fn close(a: i64, b: i64) -> bool {
+    (a - b).abs() * 50 <= a.max(b)
+}
+
+const RAIDS: &[(&str, &[i64])] = &[
+    ("拉圖斯", &[53_750_000, 12_450_310]),
+    ("拉圖斯（困難）", &[160_000_000, 20_000_000]),
+    ("殘暴炎魔", &[66_000_000, 68_000_000, 70_000_000]),
+    ("闇黑龍王", &[134_860_000, 134_860_000, 1_848_000_000]),
+    ("克雷塞爾", &[315_000_000, 472_500_000]),
+    ("艾畢奈亞", &[260_000_000, 260_000_000]),
+];
+
+fn raid_phases(max: i64) -> Option<(usize, Vec<usize>)> {
+    RAIDS.iter().enumerate().find_map(|(i, (_, hps))| {
+        let ph: Vec<usize> = (0..hps.len()).filter(|&k| (max - hps[k]).abs() * 200 <= hps[k] * 3).collect();
+        (!ph.is_empty()).then_some((i, ph))
+    })
+}
+
+pub fn raid_name(max: i64) -> Option<&'static str> {
+    raid_phases(max).map(|(i, _)| RAIDS[i].0)
+}
+
+fn alike(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a == b {
+        return true;
+    }
+    if a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            d[i][j] = if a[i - 1] == b[j - 1] { d[i - 1][j - 1] + 1 } else { d[i - 1][j].max(d[i][j - 1]) };
+        }
+    }
+    let l = d[a.len()][b.len()];
+    l >= 2 && l * 3 >= a.len().min(b.len()) * 2
+}
+
+fn boss_names(recs: &[BossRec]) -> Vec<String> {
+    let mut names: Vec<(&str, usize)> = vec![];
+    for r in recs {
+        match names.iter_mut().find(|n| n.0 == r.name) {
+            Some(n) => n.1 += 1,
+            None => names.push((&r.name, 1)),
+        }
+    }
+    let mut parent: Vec<usize> = (0..names.len()).collect();
+    fn root(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            i = p[i];
+        }
+        i
+    }
+    let idx = |name: &str| names.iter().position(|n| n.0 == name).unwrap();
+    for x in recs {
+        for y in recs {
+            if x.name != y.name && close(x.max, y.max) && alike(&x.name, &y.name) {
+                let (a, b) = (root(&mut parent, idx(&x.name)), root(&mut parent, idx(&y.name)));
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    let mut best: Vec<usize> = (0..names.len()).collect();
+    for i in 0..names.len() {
+        let r = root(&mut parent, i);
+        if names[i].1 > names[best[r]].1 {
+            best[r] = i;
+        }
+    }
+    recs.iter().map(|r| raid_name(r.max).unwrap_or(names[best[root(&mut parent, idx(&r.name))]].0).to_string()).collect()
+}
+
+fn group_boss(recs: &[BossRec]) -> Vec<Vec<usize>> {
+    let n = recs.len();
+    let names = boss_names(recs);
+    let mut kinds: Vec<(&str, i64)> = vec![];
+    let id: Vec<usize> = recs
+        .iter()
+        .zip(&names)
+        .map(|(r, name)| match kinds.iter().position(|k| k.0 == name && close(k.1, r.max)) {
+            Some(i) => i,
+            None => {
+                kinds.push((name, r.max));
+                kinds.len() - 1
+            }
+        })
+        .collect();
+    let mut end = vec![n; n];
+    for i in (0..n.saturating_sub(1)).rev() {
+        end[i] = if recs[i + 1].start - (recs[i].start + recs[i].secs) <= PHASE_GAP { end[i + 1] } else { i + 1 };
+    }
+    let raid: Vec<Option<(usize, Vec<usize>)>> = recs.iter().map(|r| raid_phases(r.max)).collect();
+    let plain = |j: usize, len: usize| raid[j..j + len].iter().all(|x| x.is_none());
+    let periodic = |w: &[usize]| (1..w.len()).any(|p| (0..w.len() - p).all(|j| w[j] == w[j + p]));
+    let one_name = |j: usize, len: usize| names[j..j + len].iter().all(|x| *x == names[j]);
+    let mut count: HashMap<&[usize], usize> = HashMap::new();
+    let mut lead: HashMap<&[usize], usize> = HashMap::new();
+    let mut gaps: HashMap<&[usize], f64> = HashMap::new();
+    let gap = |k: usize| recs[k + 1].start - (recs[k].start + recs[k].secs);
+    let mut a = 0;
+    while a < n {
+        let b = end[a];
+        for len in 2..=MAX_PHASES.min(b - a) {
+            let mut taken: HashMap<&[usize], usize> = HashMap::new();
+            for j in a..=b - len {
+                let w = &id[j..j + len];
+                if periodic(w) || !one_name(j, len) || !plain(j, len) || taken.get(w).map_or(false, |&e| j < e) {
+                    continue;
+                }
+                taken.insert(w, j + len);
+                *count.entry(w).or_insert(0) += 1;
+                *gaps.entry(w).or_insert(0.0) += (j..j + len - 1).map(gap).sum::<f64>();
+                if j == a {
+                    *lead.entry(w).or_insert(0) += 1;
+                }
+            }
+        }
+        a = b;
+    }
+    let score = |w: &[usize]| (lead.get(w).copied().unwrap_or(0), gaps.get(w).copied().unwrap_or(0.0) / count.get(w).copied().unwrap_or(1) as f64);
+    let ok = |w: &[usize]| {
+        let (l, g) = score(w);
+        count.get(w).map_or(false, |&c| c >= 2)
+            && l > 0
+            && (1..w.len()).all(|r| {
+                let rot: Vec<usize> = w[r..].iter().chain(&w[..r]).copied().collect();
+                let (l2, g2) = score(&rot);
+                !(l2 > l || (l2 == l && g2 < g))
+            })
+    };
+    let mut out = vec![];
+    let mut i = 0;
+    while i < n {
+        if let Some((ri, ph)) = &raid[i] {
+            let (mut p, mut j) = (ph[0], i + 1);
+            while j < end[i] {
+                let Some((rj, pj)) = &raid[j] else { break };
+                let Some(&q) = pj.iter().find(|&&q| q > p).filter(|_| rj == ri) else { break };
+                if pj.contains(&p) && recs[j].start - (recs[j - 1].start + recs[j - 1].secs) > RAID_GAP {
+                    break;
+                }
+                p = q;
+                j += 1;
+            }
+            out.push((i..j).collect());
+            i = j;
+            continue;
+        }
+        let len = (2..=MAX_PHASES.min(end[i] - i)).rev().find(|&l| plain(i, l) && ok(&id[i..i + l])).unwrap_or(1);
+        out.push((i..i + len).collect());
+        i += len;
+    }
+    out
+}
+
+struct BossRun<'a> {
+    parts: Vec<&'a BossRec>,
+    name: &'a str,
+}
+
+impl BossRun<'_> {
+    fn first(&self) -> &BossRec {
+        self.parts[0]
+    }
+    fn last(&self) -> &BossRec {
+        self.parts[self.parts.len() - 1]
+    }
+    fn secs(&self) -> f64 {
+        self.last().start + self.last().secs - self.first().start
+    }
+    fn dpm(&self) -> f64 {
+        if self.parts.len() == 1 {
+            return self.first().dpm;
+        }
+        let secs: f64 = self.parts.iter().map(|p| p.secs).sum();
+        let dmg: i64 = self.parts.iter().map(|p| p.dmg).sum();
+        if secs > 0.0 { dmg as f64 / secs * 60.0 } else { 0.0 }
+    }
+    fn key(&self) -> String {
+        format!("{} {}", rec_key(self.first()), self.parts.len())
+    }
+    fn curve(&self, curves: &HashMap<String, Vec<(f64, i64)>>) -> Option<Vec<(f64, i64)>> {
+        let mut out = vec![];
+        let mut dd = 0;
+        for p in &self.parts {
+            let c = curves.get(&curve_key(&p.when, &p.name, p.secs))?;
+            let dt = p.start - self.first().start;
+            out.extend(c.iter().map(|&(t, d)| (t + dt, d + dd)));
+            dd += p.dmg;
+        }
+        Some(out)
+    }
+}
+
+pub fn load_boss(path: &std::path::Path) -> Vec<BossRec> {
+    let Ok(raw) = std::fs::read(path) else { return vec![] };
+    let text = String::from_utf8_lossy(raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&raw)).to_string();
+    let mut v: Vec<BossRec> = text.lines().filter_map(parse_boss).collect();
+    v.sort_by(|a, b| a.when.cmp(&b.when));
+    v
+}
+
+fn curve_key(when: &str, name: &str, secs: f64) -> String {
+    format!("{when} {name} {}", secs.round() as i64)
+}
+
+pub fn load_boss_curves(path: &Path) -> HashMap<String, Vec<(f64, i64)>> {
+    let mut m = HashMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else { return m };
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let (Some(when), Some(name), Some(secs), Some(pts)) = (v["when"].as_str(), v["name"].as_str(), v["secs"].as_f64(), v["pts"].as_array()) else { continue };
+        let pts: Vec<(f64, i64)> = pts.iter().filter_map(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_i64()?))).collect();
+        m.insert(curve_key(when, name, secs), pts);
+    }
+    m
+}
+
 fn days_of(day: &str) -> Option<i64> {
     let y: i64 = day.get(0..4)?.parse().ok()?;
     let m: i64 = day.get(5..7)?.parse().ok()?;
@@ -136,6 +399,11 @@ fn hm_len(min: f64) -> String {
     if m >= 60 { format!("{}小時 {}分", m / 60, m % 60) } else { format!("{m}分") }
 }
 
+fn mmss(sec: f64) -> String {
+    let s = sec.max(0.0).round() as i64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
 fn del_button(ui: &mut egui::Ui) -> bool {
     let (r, resp) = ui.allocate_exact_size(vec2(24.0, 22.0), Sense::click());
     let hot = resp.hovered();
@@ -158,6 +426,33 @@ pub(crate) struct Undo {
 enum Act {
     Delete(Seg),
     Undo,
+    BossDelete(Vec<BossRec>),
+    BossUndo,
+}
+
+#[derive(Default)]
+pub(crate) struct BossTab {
+    recs: Vec<BossRec>,
+    groups: Vec<Vec<usize>>,
+    names: Vec<String>,
+    curves: HashMap<String, Vec<(f64, i64)>>,
+    pub(crate) open: Option<String>,
+    pub(crate) confirm: Option<String>,
+    pub(crate) undo: Option<Undo>,
+}
+
+fn rec_key(r: &BossRec) -> String {
+    format!("{} {} {} {}", r.when, r.name, r.secs, r.dpm)
+}
+
+fn in_range(range: usize, day: &str, tday: i64) -> bool {
+    let d = days_of(day).unwrap_or(0);
+    match range {
+        0 => d == tday,
+        1 => d > tday - 7,
+        2 => d > tday - 30,
+        _ => true,
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -208,6 +503,8 @@ pub struct History {
     pub(crate) confirm_del: Option<String>,
     pub(crate) undo: Option<Undo>,
     pub(crate) note: Option<String>,
+    pub(crate) boss_tab: bool,
+    pub(crate) boss: BossTab,
     pub focus: bool,
     pub prev_fg: Option<isize>,
     pub pos: Option<(i32, i32)>,
@@ -232,6 +529,8 @@ impl History {
             confirm_del: None,
             undo: None,
             note: None,
+            boss_tab: false,
+            boss: BossTab::default(),
             focus: true,
             prev_fg,
             pos: None,
@@ -335,6 +634,10 @@ fn nice(lo0: f64, hi0: f64) -> (f64, f64, f64) {
 }
 
 fn curve_chart(ui: &mut egui::Ui, w: f32, xs: &[f64], lines: &[(Vec<f64>, Color32)], fmt: &dyn Fn(f64) -> String, tip: &dyn Fn(usize) -> String) {
+    curve_chart_x(ui, w, xs, lines, fmt, tip, false);
+}
+
+fn curve_chart_x(ui: &mut egui::Ui, w: f32, xs: &[f64], lines: &[(Vec<f64>, Color32)], fmt: &dyn Fn(f64) -> String, tip: &dyn Fn(usize) -> String, clock: bool) {
     let (resp, p) = ui.allocate_painter(vec2(w, if xs.len() < 2 { 56.0 } else { 150.0 }), Sense::hover());
     let r = resp.rect;
     p.rect_filled(r, 6.0, BG);
@@ -359,10 +662,11 @@ fn curve_chart(ui: &mut egui::Ui, w: f32, xs: &[f64], lines: &[(Vec<f64>, Color3
     if lo < 0.0 {
         p.line_segment([pos2(plot.left(), y_of(0.0)), pos2(plot.right(), y_of(0.0))], Stroke::new(1.0_f32, MUTED.gamma_multiply(0.6)));
     }
-    let xstep = [1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 180.0, 360.0].into_iter().find(|&s| xmax / s <= 6.0).unwrap_or(600.0);
+    let steps: &[f64] = if clock { &[0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0] } else { &[1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 180.0, 360.0] };
+    let xstep = steps.iter().copied().find(|&s| xmax / s <= 6.0).unwrap_or(600.0);
     let mut m = 0.0;
     while m <= xmax + 1e-6 {
-        let lab = if xstep >= 60.0 { format!("{}小時", m / 60.0) } else { format!("{m}分") };
+        let lab = if clock { mmss(m * 60.0) } else if xstep >= 60.0 { format!("{}小時", m / 60.0) } else { format!("{m}分") };
         p.text(pos2(x_of(m), plot.bottom() + 6.0), Align2::CENTER_TOP, lab, mono(7.5, false), MUTED);
         m += xstep;
     }
@@ -600,6 +904,14 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
         h.loaded = now;
         h.segs = load(&o.paths.csv);
         h.curves = load_curves(&o.paths.csv);
+        h.boss.recs = load_boss(&o.paths.here.join(BOSS_FILE));
+        h.boss.groups = group_boss(&h.boss.recs);
+        h.boss.names = boss_names(&h.boss.recs);
+        h.boss.curves = load_boss_curves(&o.paths.here.join(BOSS_CURVE_FILE));
+    }
+    let tabs = crate::boss::enabled(&o.t.cfg) || !h.boss.recs.is_empty();
+    if !tabs {
+        h.boss_tab = false;
     }
     let live = live_seg(o);
     let live_curve = live.as_ref().filter(|l| h.open_seg.as_deref() == Some(l.start.as_str())).map(|_| o.t.curve_now());
@@ -612,15 +924,7 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
     let pick: Vec<&Seg> = all
         .iter()
         .copied()
-        .filter(|s| {
-            let d = days_of(s.day()).unwrap_or(0);
-            match h.range {
-                0 => d == tday,
-                1 => d > tday - 7,
-                2 => d > tday - 30,
-                _ => true,
-            }
-        })
+        .filter(|s| in_range(h.range, s.day(), tday))
         .collect();
     let tot = sum(&pick);
     let mut act: Option<Act> = None;
@@ -632,15 +936,31 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
             let width = COLS.iter().sum::<f32>() + 40.0;
             ui.set_max_width(width);
             ui.set_min_width(width);
-            ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(vec2(width, 24.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.set_width(width);
                 ui.spacing_mut().item_spacing.x = 6.0;
                 for (i, n) in RANGES.iter().enumerate() {
                     if chip(ui, n, h.range == i, 9.5) {
                         h.range = i;
                     }
                 }
+                if tabs {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if chip(ui, "打王", h.boss_tab, 9.5) {
+                            h.boss_tab = true;
+                        }
+                        if chip(ui, "練功", !h.boss_tab, 9.5) {
+                            h.boss_tab = false;
+                        }
+                    });
+                }
             });
             ui.add_space(10.0);
+            if h.boss_tab {
+                boss_view(ui, &mut h.boss, h.range, tday, &h.note, width, list_h, &mut act);
+                return;
+            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let cw = (width - 16.0) / 3.0;
@@ -909,7 +1229,132 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
     !close
 }
 
+#[allow(clippy::too_many_arguments)]
+fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: &Option<String>, width: f32, list_h: f32, act: &mut Option<Act>) {
+    let runs: Vec<BossRun> = b
+        .groups
+        .iter()
+        .map(|g| BossRun { parts: g.iter().map(|&i| &b.recs[i]).collect(), name: b.names.get(g[g.len() - 1]).map_or("", |s| s.as_str()) })
+        .filter(|r| in_range(range, r.first().when.get(..10).unwrap_or(""), tday))
+        .collect();
+    ui.add(egui::Label::new(RichText::new("紀錄").font(bold(10.0)).color(INK)).selectable(false));
+    ui.add_space(4.0);
+    if let Some(n) = note {
+        ui.add(egui::Label::new(RichText::new(n).font(font(9.0)).color(HP)).selectable(false));
+        ui.add_space(4.0);
+    }
+    if let Some(u) = &b.undo {
+        egui::Frame::new().fill(PANEL).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+            ui.set_width(width - 20.0);
+            ui.allocate_ui_with_layout(vec2(width - 20.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.add(egui::Label::new(RichText::new(format!("已刪除 {} 那一筆", u.label)).font(font(9.5)).color(INK)).selectable(false));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if crate::dialogs::button(ui, "復原", MP, Color32::from_rgb(0x0b, 0x14, 0x26), 9.0, 48.0) {
+                        *act = Some(Act::BossUndo);
+                    }
+                });
+            });
+        });
+        ui.add_space(6.0);
+    }
+    const BC: [f32; 4] = [130.0, 200.0, 100.0, 110.0];
+    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(10.0);
+        let head = |t: &str| RichText::new(t).font(font(8.0)).color(MUTED);
+        cell(ui, BC[0], false, head("時間"), None);
+        cell(ui, BC[1], false, head("王"), None);
+        cell(ui, BC[2], true, head("耗時"), None);
+        cell(ui, BC[3], true, head("DPM"), None);
+    });
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical().id_salt("boss_list").max_height(list_h).min_scrolled_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+        if runs.is_empty() {
+            ui.add_space(10.0);
+            ui.add(egui::Label::new(RichText::new("這段期間沒有紀錄").font(font(9.0)).color(MUTED)));
+        }
+        for r in runs.iter().rev() {
+            let key = r.key();
+            let is_open = b.open.as_deref() == Some(key.as_str());
+            let when = &r.first().when;
+            let (day, hm) = (when.get(..10).unwrap_or(""), when.get(11..16).unwrap_or(""));
+            let name = r.name;
+            ui.add_space(6.0);
+            let bg = ui.painter().add(Shape::Noop);
+            let row = ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(10.0);
+                cell(ui, BC[0], false, RichText::new(format!("{} {hm}", md(day))).font(font(9.5)).color(MUTED), None);
+                cell(ui, BC[1], false, RichText::new(name).font(font(9.5)).color(INK), None);
+                cell(ui, BC[2], true, RichText::new(mmss(r.secs())).font(mono(10.0, true)).color(INK), None);
+                cell(ui, BC[3], true, RichText::new(short(Some(r.dpm()))).font(mono(10.0, true)).color(MP), None);
+            });
+            let left = ui.max_rect().left();
+            let rr = Rect::from_min_max(pos2(left, row.response.rect.top() - 4.0), pos2(left + width, row.response.rect.bottom() + 4.0));
+            let hit = ui.interact(rr, egui::Id::new(("boss", key.as_str())), Sense::click());
+            if hit.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if hit.hovered() || is_open {
+                let fill = if is_open { PANEL } else { Color32::from_rgb(0x1a, 0x21, 0x2d) };
+                ui.painter().set(bg, Shape::rect_filled(rr, 6.0, fill));
+            }
+            if hit.clicked() {
+                b.open = if is_open { None } else { Some(key.clone()) };
+                b.confirm = None;
+            }
+            if !is_open {
+                continue;
+            }
+            ui.add_space(4.0);
+            let dw = width - 24.0;
+            egui::Frame::new().fill(PANEL).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+                ui.set_width(dw);
+                boss_detail(ui, dw, r.curve(&b.curves).as_deref());
+                ui.add_space(6.0);
+                if b.confirm.as_deref() == Some(key.as_str()) {
+                    egui::Frame::new().fill(Color32::from_rgb(0x3a, 0x1f, 0x24)).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                        ui.allocate_ui_with_layout(vec2(dw - 20.0, 24.0), Layout::left_to_right(Align::Center), |ui| {
+                            let q = format!("確定要刪除 {} {hm} {name} 這一筆嗎？", md(day));
+                            ui.add(egui::Label::new(RichText::new(q).font(bold(9.5)).color(INK)).selectable(false));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if crate::dialogs::button(ui, "取消", PANEL, INK, 9.0, 48.0) {
+                                    b.confirm = None;
+                                }
+                                if crate::dialogs::button(ui, "刪除", HP, Color32::from_rgb(0x26, 0x0b, 0x0b), 9.0, 48.0) {
+                                    *act = Some(Act::BossDelete(r.parts.iter().map(|p| (*p).clone()).collect()));
+                                }
+                            });
+                        });
+                    });
+                } else {
+                    ui.allocate_ui_with_layout(vec2(dw, 22.0), Layout::right_to_left(Align::Center), |ui| {
+                        if del_button(ui) {
+                            b.confirm = Some(key.clone());
+                        }
+                    });
+                }
+            });
+        }
+    });
+}
+
+fn boss_detail(ui: &mut egui::Ui, w: f32, curve: Option<&[(f64, i64)]>) {
+    ui.add(egui::Label::new(RichText::new("DPM").font(bold(9.5)).color(INK)).selectable(false));
+    ui.add_space(4.0);
+    let Some(c) = curve.filter(|c| c.len() >= 3) else {
+        let (r, _) = ui.allocate_exact_size(vec2(w, 56.0), Sense::hover());
+        ui.painter().rect_filled(r, 6.0, BG);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, "無紀錄", font(9.0), MUTED);
+        return;
+    };
+    let xs: Vec<f64> = c[1..].iter().map(|p| p.0 / 60.0).collect();
+    let v: Vec<f64> = c.windows(2).map(|p| if p[1].0 > p[0].0 { (p[1].1 - p[0].1) as f64 / (p[1].0 - p[0].0) * 60.0 } else { 0.0 }).collect();
+    curve_chart_x(ui, w, &xs, &[(v.clone(), MP)], &|x| short(Some(x)), &|i| format!("{}  DPM {}", mmss(xs[i] * 60.0), short(Some(v[i]))), true);
+}
+
 const LOCKED: &str = "練功紀錄.csv 被別的程式開著（Excel？），關掉再試一次";
+const BOSS_LOCKED: &str = "打王紀錄.csv 被別的程式開著（Excel？），關掉再試一次";
 
 fn run_act(o: &mut Overlay, h: &mut History, a: Act) {
     h.note = None;
@@ -951,6 +1396,33 @@ fn run_act(o: &mut Overlay, h: &mut History, a: Act) {
                 h.undo = Some(Undo { label: u.label, lines: left });
             }
         }
+        Act::BossDelete(recs) => {
+            let path = o.paths.here.join(BOSS_FILE);
+            h.boss.confirm = None;
+            match tracker::remove_csv_lines(&path, &|l| parse_boss(l).map_or(false, |r| recs.contains(&r))) {
+                Ok(v) if !v.is_empty() => {
+                    let (first, last) = (&recs[0], &recs[recs.len() - 1]);
+                    let label = format!("{} {} {}", md(first.when.get(..10).unwrap_or("")), first.when.get(11..16).unwrap_or(""), last.name);
+                    h.boss.undo = Some(Undo { label, lines: vec![(path, v)] });
+                }
+                Ok(_) => h.note = Some("找不到這一筆，可能檔案剛被改過".to_string()),
+                Err(_) => h.note = Some(format!("刪不掉：{BOSS_LOCKED}")),
+            }
+        }
+        Act::BossUndo => {
+            let Some(u) = h.boss.undo.take() else { return };
+            let head: Vec<String> = BOSS_HEAD.iter().map(|s| s.to_string()).collect();
+            let mut left = vec![];
+            for (p, v) in u.lines {
+                if tracker::restore_csv_lines(&p, &head, &v).is_err() {
+                    left.push((p, v));
+                }
+            }
+            if !left.is_empty() {
+                h.note = Some(format!("復原不了：{BOSS_LOCKED}"));
+                h.boss.undo = Some(Undo { label: u.label, lines: left });
+            }
+        }
     }
 }
 
@@ -970,6 +1442,90 @@ mod tests {
         let s = parse_row("2026-09-29 06:47,4.4,221925,3048966,0,0,0,0,0,0,0,,,").unwrap();
         assert_eq!(s.meso, None);
         assert_eq!(s.net, None);
+    }
+
+    #[test]
+    fn boss_phases_grouped() {
+        let rows = [
+            "2026-10-12 10:00:00,拉圖斯,53750000,100,400,53750000,134375,8062500",
+            "2026-10-12 10:06:50,拉圖斯,12450310,100,100,12450310,124503,7470186",
+            "2026-10-12 12:00:00,海怒斯,65562487,99,500,64906862,129814,7788823",
+            "2026-10-12 12:09:00,海怒斯,65562487,99,480,64906862,135222,8113357",
+            "2026-10-12 12:17:30,海怒斯,65562487,99,490,64906862,132463,7947775",
+            "2026-10-12 20:00:00,拉圖斯,53750000,100,380,53750000,141447,8486842",
+            "2026-10-12 20:06:40,拉圖斯,12450310,100,90,12450310,138337,8300206",
+            "2026-10-12 22:00:00,殘暴炎魔,100000000,100,600,100000000,166667,10000000",
+            "2026-10-12 22:10:30,拉圖斯,12450310,100,90,12450310,138337,8300206",
+        ];
+        let recs: Vec<BossRec> = rows.iter().filter_map(|l| parse_boss(l)).collect();
+        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5, 6], vec![7], vec![8]]);
+        let run = BossRun { parts: vec![&recs[0], &recs[1]], name: "拉圖斯" };
+        assert_eq!(run.secs(), 510.0);
+        assert_eq!(run.dpm().round(), (66_200_310.0_f64 / 500.0 * 60.0).round());
+        let r = |t: &str, max: i64| parse_boss(&format!("2026-10-14 {t},拉圖斯,{max},100,100,{max},1,1")).unwrap();
+        let (c, p) = (53_750_000, 12_450_310);
+        let recs = vec![r("10:00:00", c), r("10:02:00", p), r("12:00:00", p), r("12:02:10", c), r("12:04:00", p), r("12:06:10", c), r("12:08:00", p)];
+        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2], vec![3, 4], vec![5, 6]]);
+        let d = |t: &str, name: &str| parse_boss(&format!("2026-10-15 {t},{name},5000000,100,30,5000000,1,1")).unwrap();
+        let mut recs = vec![];
+        for h in ["10", "11"] {
+            for (k, name) in ["蘑菇王", "藍色蘑菇王", "殭屍蘑菇王", "肥肥", "巴洛古"].iter().enumerate() {
+                recs.push(d(&format!("{h}:0{k}:00"), name));
+            }
+        }
+        assert!(group_boss(&recs).iter().all(|g| g.len() == 1));
+        let h = |t: &str, max: i64| parse_boss(&format!("2026-10-13 {t},闇黑龍王,{max},100,300,{max},1,1")).unwrap();
+        let recs = vec![h("21:00:00", 134_860_000), h("21:05:10", 134_860_000), h("21:13:00", 1_848_000_000), h("23:00:00", 134_860_000), h("23:05:10", 134_860_000), h("23:12:00", 1_848_000_000)];
+        assert_eq!(group_boss(&recs), vec![vec![0, 1, 2], vec![3, 4, 5]]);
+        let h = |t: &str, name: &str, max: i64| parse_boss(&format!("2026-10-13 {t},{name},{max},99,300,{max},1,1")).unwrap();
+        let recs = vec![
+            h("20:00:15", "間黑能王", 135_403_753),
+            h("20:05:15", "間黑能王", 135_787_435),
+            h("20:12:48", "間黑能王", 1_862_956_309),
+            h("21:00:12", "黑龍王", 136_208_616),
+            h("21:05:18", "黑龍王", 135_493_551),
+            h("21:13:57", "間黑龍王", 1_864_239_530),
+        ];
+        assert_eq!(group_boss(&recs), vec![vec![0, 1, 2], vec![3, 4, 5]]);
+        assert!(boss_names(&recs).iter().all(|n| n == "闇黑龍王"));
+        let z = |t: &str, max: i64| parse_boss(&format!("2026-10-12 {t},残暴炎魔,{max},99,200,{max},1,1")).unwrap();
+        let recs = vec![z("16:07:36", 65_982_844), z("16:10:54", 68_002_639), z("16:14:21", 70_020_003), z("18:00:00", 65_990_000), z("18:03:30", 68_010_000), z("18:07:00", 70_000_000)];
+        assert_eq!(group_boss(&recs), vec![vec![0, 1, 2], vec![3, 4, 5]]);
+    }
+
+    #[test]
+    fn raids_by_table() {
+        let r = |t: &str, name: &str, max: i64| parse_boss(&format!("2026-10-12 {t},{name},{max},99,100,{max},1,1")).unwrap();
+        let recs = vec![r("15:00:15", "拉圖斯", 160_002_243), r("15:01:58", "拉圖斯", 20_010_493), r("16:00:00", "拉圖斯", 53_750_000), r("16:01:50", "拉圖斯", 12_450_310)];
+        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(boss_names(&recs), vec!["拉圖斯（困難）", "拉圖斯（困難）", "拉圖斯", "拉圖斯"]);
+        let recs = vec![
+            r("20:00:00", "闇黑龍王", 134_858_225),
+            r("20:01:53", "闇黑龍王", 134_860_038),
+            r("21:00:00", "新王", 30_000_000),
+            r("21:03:00", "新王", 9_000_000),
+            r("22:00:00", "新王", 30_000_000),
+            r("22:03:00", "新王", 9_000_000),
+        ];
+        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
+        let ep = |ts: &[&str]| -> Vec<BossRec> { ts.iter().map(|t| r(t, "艾畢奈亞", 260_000_000)).collect() };
+        assert_eq!(group_boss(&ep(&["10:00:00", "10:01:50", "10:05:00", "10:06:55"])), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(group_boss(&ep(&["10:00:00", "10:08:00", "10:09:50"])), vec![vec![0], vec![1, 2]]);
+        let recs = vec![r("20:00:00", "闇黑龍王", 134_860_000), r("20:10:00", "闇黑龍王", 134_860_000), r("20:11:50", "闇黑龍王", 134_860_000), r("20:15:00", "闇黑龍王", 1_848_000_000)];
+        assert_eq!(group_boss(&recs), vec![vec![0], vec![1, 2, 3]]);
+        assert_eq!(raid_name(1_848_076_476), Some("闇黑龍王"));
+        assert_eq!(raid_name(30_000_000), None);
+    }
+
+    #[test]
+    fn names_alike() {
+        assert!(alike("闇黑龍王", "黑龍王"));
+        assert!(alike("間黑能王", "黑龍王"));
+        assert!(!alike("蘑菇王", "藍色蘑菇王"));
+        assert!(!alike("藍色蘑菇王", "殭屍蘑菇王"));
+        assert!(!alike("拉圖斯", "拉圖斯的時鐘"));
+        let r = |name: &str, max: i64| parse_boss(&format!("2026-10-13 10:00:00,{name},{max},100,30,{max},1,1")).unwrap();
+        assert_eq!(boss_names(&[r("紅寶王", 5_000_000), r("藍寶王", 9_000_000)]), vec!["紅寶王", "藍寶王"]);
     }
 
     #[test]
