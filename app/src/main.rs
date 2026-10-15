@@ -11,6 +11,7 @@ mod runner;
 mod select;
 mod ui;
 mod worker;
+mod zakum;
 
 use std::sync::mpsc::channel;
 

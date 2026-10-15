@@ -148,7 +148,6 @@ fn secs_of(when: &str) -> f64 {
 }
 
 const PHASE_GAP: f64 = 600.0;
-const RAID_GAP: f64 = 90.0;
 const MAX_PHASES: usize = 6;
 
 fn close(a: i64, b: i64) -> bool {
@@ -227,7 +226,7 @@ fn boss_names(recs: &[BossRec]) -> Vec<String> {
     recs.iter().map(|r| raid_name(r.max).unwrap_or(names[best[root(&mut parent, idx(&r.name))]].0).to_string()).collect()
 }
 
-fn group_boss(recs: &[BossRec]) -> Vec<Vec<usize>> {
+fn group_boss(recs: &[BossRec], wipes: &[f64]) -> Vec<Vec<usize>> {
     let n = recs.len();
     let names = boss_names(recs);
     let mut kinds: Vec<(&str, i64)> = vec![];
@@ -244,7 +243,8 @@ fn group_boss(recs: &[BossRec]) -> Vec<Vec<usize>> {
         .collect();
     let mut end = vec![n; n];
     for i in (0..n.saturating_sub(1)).rev() {
-        end[i] = if recs[i + 1].start - (recs[i].start + recs[i].secs) <= PHASE_GAP { end[i + 1] } else { i + 1 };
+        let wiped = wipes.iter().any(|&w| recs[i].start < w && w < recs[i + 1].start);
+        end[i] = if !wiped && recs[i + 1].start - (recs[i].start + recs[i].secs) <= PHASE_GAP { end[i + 1] } else { i + 1 };
     }
     let raid: Vec<Option<(usize, Vec<usize>)>> = recs.iter().map(|r| raid_phases(r.max)).collect();
     let plain = |j: usize, len: usize| raid[j..j + len].iter().all(|x| x.is_none());
@@ -293,9 +293,6 @@ fn group_boss(recs: &[BossRec]) -> Vec<Vec<usize>> {
             while j < end[i] {
                 let Some((rj, pj)) = &raid[j] else { break };
                 let Some(&q) = pj.iter().find(|&&q| q > p).filter(|_| rj == ri) else { break };
-                if pj.contains(&p) && recs[j].start - (recs[j - 1].start + recs[j - 1].secs) > RAID_GAP {
-                    break;
-                }
                 p = q;
                 j += 1;
             }
@@ -371,6 +368,15 @@ pub fn load_boss_curves(path: &Path) -> HashMap<String, Vec<(f64, i64)>> {
         m.insert(curve_key(when, name, secs), pts);
     }
     m
+}
+
+pub fn load_boss_wipes(path: &Path) -> Vec<f64> {
+    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|v| v["wipe"].as_bool() == Some(true))
+        .filter_map(|v| v["when"].as_str().map(secs_of))
+        .collect()
 }
 
 fn days_of(day: &str) -> Option<i64> {
@@ -905,7 +911,7 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
         h.segs = load(&o.paths.csv);
         h.curves = load_curves(&o.paths.csv);
         h.boss.recs = load_boss(&o.paths.here.join(BOSS_FILE));
-        h.boss.groups = group_boss(&h.boss.recs);
+        h.boss.groups = group_boss(&h.boss.recs, &load_boss_wipes(&o.paths.here.join(BOSS_CURVE_FILE)));
         h.boss.names = boss_names(&h.boss.recs);
         h.boss.curves = load_boss_curves(&o.paths.here.join(BOSS_CURVE_FILE));
     }
@@ -1458,14 +1464,14 @@ mod tests {
             "2026-10-12 22:10:30,拉圖斯,12450310,100,90,12450310,138337,8300206",
         ];
         let recs: Vec<BossRec> = rows.iter().filter_map(|l| parse_boss(l)).collect();
-        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5, 6], vec![7], vec![8]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5, 6], vec![7], vec![8]]);
         let run = BossRun { parts: vec![&recs[0], &recs[1]], name: "拉圖斯" };
         assert_eq!(run.secs(), 510.0);
         assert_eq!(run.dpm().round(), (66_200_310.0_f64 / 500.0 * 60.0).round());
         let r = |t: &str, max: i64| parse_boss(&format!("2026-10-14 {t},拉圖斯,{max},100,100,{max},1,1")).unwrap();
         let (c, p) = (53_750_000, 12_450_310);
         let recs = vec![r("10:00:00", c), r("10:02:00", p), r("12:00:00", p), r("12:02:10", c), r("12:04:00", p), r("12:06:10", c), r("12:08:00", p)];
-        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2], vec![3, 4], vec![5, 6]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1], vec![2], vec![3, 4], vec![5, 6]]);
         let d = |t: &str, name: &str| parse_boss(&format!("2026-10-15 {t},{name},5000000,100,30,5000000,1,1")).unwrap();
         let mut recs = vec![];
         for h in ["10", "11"] {
@@ -1473,10 +1479,10 @@ mod tests {
                 recs.push(d(&format!("{h}:0{k}:00"), name));
             }
         }
-        assert!(group_boss(&recs).iter().all(|g| g.len() == 1));
+        assert!(group_boss(&recs, &[]).iter().all(|g| g.len() == 1));
         let h = |t: &str, max: i64| parse_boss(&format!("2026-10-13 {t},闇黑龍王,{max},100,300,{max},1,1")).unwrap();
         let recs = vec![h("21:00:00", 134_860_000), h("21:05:10", 134_860_000), h("21:13:00", 1_848_000_000), h("23:00:00", 134_860_000), h("23:05:10", 134_860_000), h("23:12:00", 1_848_000_000)];
-        assert_eq!(group_boss(&recs), vec![vec![0, 1, 2], vec![3, 4, 5]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1, 2], vec![3, 4, 5]]);
         let h = |t: &str, name: &str, max: i64| parse_boss(&format!("2026-10-13 {t},{name},{max},99,300,{max},1,1")).unwrap();
         let recs = vec![
             h("20:00:15", "間黑能王", 135_403_753),
@@ -1486,18 +1492,18 @@ mod tests {
             h("21:05:18", "黑龍王", 135_493_551),
             h("21:13:57", "間黑龍王", 1_864_239_530),
         ];
-        assert_eq!(group_boss(&recs), vec![vec![0, 1, 2], vec![3, 4, 5]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1, 2], vec![3, 4, 5]]);
         assert!(boss_names(&recs).iter().all(|n| n == "闇黑龍王"));
         let z = |t: &str, max: i64| parse_boss(&format!("2026-10-12 {t},残暴炎魔,{max},99,200,{max},1,1")).unwrap();
         let recs = vec![z("16:07:36", 65_982_844), z("16:10:54", 68_002_639), z("16:14:21", 70_020_003), z("18:00:00", 65_990_000), z("18:03:30", 68_010_000), z("18:07:00", 70_000_000)];
-        assert_eq!(group_boss(&recs), vec![vec![0, 1, 2], vec![3, 4, 5]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1, 2], vec![3, 4, 5]]);
     }
 
     #[test]
     fn raids_by_table() {
         let r = |t: &str, name: &str, max: i64| parse_boss(&format!("2026-10-12 {t},{name},{max},99,100,{max},1,1")).unwrap();
         let recs = vec![r("15:00:15", "拉圖斯", 160_002_243), r("15:01:58", "拉圖斯", 20_010_493), r("16:00:00", "拉圖斯", 53_750_000), r("16:01:50", "拉圖斯", 12_450_310)];
-        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1], vec![2, 3]]);
         assert_eq!(boss_names(&recs), vec!["拉圖斯（困難）", "拉圖斯（困難）", "拉圖斯", "拉圖斯"]);
         let recs = vec![
             r("20:00:00", "闇黑龍王", 134_858_225),
@@ -1507,12 +1513,22 @@ mod tests {
             r("22:00:00", "新王", 30_000_000),
             r("22:03:00", "新王", 9_000_000),
         ];
-        assert_eq!(group_boss(&recs), vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
+        assert_eq!(group_boss(&recs, &[]), vec![vec![0, 1], vec![2, 3], vec![4, 5]]);
         let ep = |ts: &[&str]| -> Vec<BossRec> { ts.iter().map(|t| r(t, "艾畢奈亞", 260_000_000)).collect() };
-        assert_eq!(group_boss(&ep(&["10:00:00", "10:01:50", "10:05:00", "10:06:55"])), vec![vec![0, 1], vec![2, 3]]);
-        assert_eq!(group_boss(&ep(&["10:00:00", "10:08:00", "10:09:50"])), vec![vec![0], vec![1, 2]]);
-        let recs = vec![r("20:00:00", "闇黑龍王", 134_860_000), r("20:10:00", "闇黑龍王", 134_860_000), r("20:11:50", "闇黑龍王", 134_860_000), r("20:15:00", "闇黑龍王", 1_848_000_000)];
-        assert_eq!(group_boss(&recs), vec![vec![0], vec![1, 2, 3]]);
+        assert_eq!(group_boss(&ep(&["10:00:00", "10:01:50", "10:05:00", "10:06:55"]), &[]), vec![vec![0, 1], vec![2, 3]]);
+        let w = |t: &str| secs_of(&format!("2026-10-12 {t}"));
+        assert_eq!(group_boss(&ep(&["10:00:00", "10:02:30", "10:04:20"]), &[w("10:01:50")]), vec![vec![0], vec![1, 2]]);
+        let recs = vec![r("20:00:00", "闇黑龍王", 134_860_000), r("20:03:00", "闇黑龍王", 134_860_000), r("20:04:50", "闇黑龍王", 134_860_000), r("20:07:00", "闇黑龍王", 1_848_000_000)];
+        assert_eq!(group_boss(&recs, &[w("20:01:50")]), vec![vec![0], vec![1, 2, 3]]);
+        let dir = std::env::temp_dir().join(format!("boss_wipe_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(BOSS_CURVE_FILE);
+        std::fs::write(&path, "{\"when\":\"2026-10-12 10:00:00\",\"name\":\"艾畢奈亞\",\"secs\":100,\"pts\":[[0,0],[100,260000000]]}
+{\"when\":\"2026-10-12 10:01:50\",\"name\":\"艾畢奈亞\",\"wipe\":true}
+").unwrap();
+        assert_eq!(load_boss_wipes(&path), vec![w("10:01:50")]);
+        assert_eq!(load_boss_curves(&path).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(raid_name(1_848_076_476), Some("闇黑龍王"));
         assert_eq!(raid_name(30_000_000), None);
     }

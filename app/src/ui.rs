@@ -203,6 +203,7 @@ pub struct Overlay {
     bad_hold: f64,
     screen_warned: Option<String>,
     pub boss: crate::boss::Boss,
+    pub zakum: Option<crate::zakum::Line>,
 }
 
 pub struct HintGeom {
@@ -352,6 +353,7 @@ impl Overlay {
             bad_hold: 0.0,
             screen_warned: None,
             boss: Default::default(),
+            zakum: None,
         }
         .init_book()
     }
@@ -812,6 +814,7 @@ impl Overlay {
                 Msg::Logs(l) => files::log_detail(&self.paths.detail, &l),
                 Msg::Auto(f, img) => crate::autoframe::found(self, *f, *img),
                 Msg::Boss(b) => crate::boss::on_msg(self, b),
+                Msg::Zakum(z) => self.zakum = z,
                 Msg::Ocr(o) => {
                     self.t.on_ocr(&o);
                     self.watch_ocr(&o);
@@ -1587,14 +1590,28 @@ impl Overlay {
                 if !boss_rows.is_empty() {
                     ui.add_space(6.0);
                     egui::Grid::new("boss").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
-                        for (name, col, txt) in &boss_rows {
+                        for (name, col, txt) in boss_rows.iter().filter(|r| r.0 != "黑水") {
                             ui.label(RichText::new(name).font(lbl_font(9.0)).color(MUTED));
                             ui.label(RichText::new(txt).font(mono(11.0, true)).color(*col));
                             ui.end_row();
                         }
                     });
-                    ui.add_space(4.0);
                     let w = ui.min_rect().width().max(200.0);
+                    if let Some((_, col, txt)) = boss_rows.iter().find(|r| r.0 == "黑水") {
+                        let alert = *col == HP;
+                        let on = alert && (now * 2.0) as i64 % 2 == 0;
+                        let (fill, ink, edge) = if on { (HP, BG, HP) } else if alert { (PANEL, HP, HP) } else { (PANEL, *col, *col) };
+                        ui.add_space(5.0);
+                        egui::Frame::new().fill(fill).stroke(egui::Stroke::new(if alert { 2.0 } else { 1.0 }, edge)).corner_radius(WIDGET_RADIUS).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+                            ui.set_min_width(w - 16.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("黑水").font(lbl_font(9.0)).color(if on { BG } else { MUTED }));
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(txt).font(mono(if alert { 17.0 } else { 14.0 }, true)).color(ink));
+                            });
+                        });
+                    }
+                    ui.add_space(4.0);
                     let (r, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), Sense::hover());
                     ui.painter().rect_filled(r, 0.0, LINE);
                 }

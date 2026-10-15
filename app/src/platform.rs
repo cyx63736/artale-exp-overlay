@@ -320,6 +320,51 @@ mod win {
             SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         }
     }
+
+    pub fn own_windows() -> Vec<(i32, i32, i32, i32)> {
+        unsafe extern "system" fn each(h: HWND, out: LPARAM) -> windows_sys::core::BOOL {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(h, &mut pid) };
+            if pid == unsafe { GetCurrentProcessId() } && unsafe { IsWindowVisible(h) } != 0 && unsafe { IsIconic(h) } == 0 {
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                if unsafe { GetWindowRect(h, &mut r) } != 0 && r.right > r.left && r.bottom > r.top {
+                    unsafe { (*(out as *mut Vec<(i32, i32, i32, i32)>)).push((r.left, r.top, r.right, r.bottom)) };
+                }
+            }
+            1
+        }
+        let mut v: Vec<(i32, i32, i32, i32)> = vec![];
+        unsafe {
+            EnumWindows(Some(each), &mut v as *mut _ as LPARAM);
+        }
+        v
+    }
+
+    pub fn game_rect() -> Option<(i32, i32, i32, i32)> {
+        unsafe extern "system" fn each(h: HWND, out: LPARAM) -> windows_sys::core::BOOL {
+            let mut buf = [0u16; 128];
+            let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32) };
+            let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+            if title.starts_with("MapleStory Worlds") && unsafe { IsWindowVisible(h) } != 0 && unsafe { IsIconic(h) } == 0 {
+                unsafe { *(out as *mut HWND) = h };
+                return 0;
+            }
+            1
+        }
+        let mut h: HWND = std::ptr::null_mut();
+        unsafe {
+            EnumWindows(Some(each), &mut h as *mut HWND as LPARAM);
+            if h.is_null() {
+                return None;
+            }
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(h, &mut r);
+            let mut p = POINT { x: 0, y: 0 };
+            windows_sys::Win32::Graphics::Gdi::ClientToScreen(h, &mut p);
+            let (w, hh) = (r.right - r.left, r.bottom - r.top);
+            (w >= 320 && hh >= 180).then_some((p.x, p.y, w, hh))
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -384,6 +429,12 @@ mod other {
         (0, 0, 1920, 1080)
     }
     pub fn below_normal_priority() {}
+    pub fn game_rect() -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+    pub fn own_windows() -> Vec<(i32, i32, i32, i32)> {
+        vec![]
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]

@@ -14,6 +14,7 @@ pub enum Msg {
     Logs(Vec<String>),
     Auto(Box<reader::auto::Found>, Box<ocr::img::Bgr>),
     Boss(crate::boss::Out),
+    Zakum(Option<crate::zakum::Line>),
 }
 
 pub struct Shared {
@@ -66,10 +67,14 @@ impl reader::Screen for GdiScreen {
 }
 
 pub fn spawn(paths: Paths, shared: Arc<Shared>, tx: Sender<Msg>, repaint: impl Fn() + Send + 'static) {
+    let repaint: Arc<Mutex<Box<dyn Fn() + Send>>> = Arc::new(Mutex::new(Box::new(repaint)));
+    let gate: Arc<Mutex<Option<(std::time::Instant, bool)>>> = Arc::new(Mutex::new(None));
+    #[cfg(any(windows, target_os = "macos"))]
+    spawn_zakum(paths.clone(), shared.clone(), gate.clone(), tx.clone(), repaint.clone());
     std::thread::spawn(move || {
         let send = |m: Msg| {
             let _ = tx.send(m);
-            repaint();
+            (repaint.lock().unwrap())();
         };
         crate::platform::dll_dir(&paths.models);
         let engine = match ocr::Ocr::new(&paths.models.join(if cfg!(target_os = "macos") { "libonnxruntime.dylib" } else { "onnxruntime.dll" }), &paths.models) {
@@ -151,6 +156,12 @@ pub fn spawn(paths: Paths, shared: Arc<Shared>, tx: Sender<Msg>, repaint: impl F
             #[cfg(any(windows, target_os = "macos"))]
             if crate::boss::enabled(&cfg) {
                 if let Ok(Some(m)) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| boss.tick(&cfg, &mut rd.engine, &mut screen))) {
+                    if let crate::boss::Out::Found(_, r) | crate::boss::Out::Read(Some(r)) = &m {
+                        let prev = gate.lock().unwrap().map_or(false, |g| g.1);
+                        if let Some(p3) = crate::zakum::zakum_phase(&r.name, r.hp, r.pct, prev) {
+                            *gate.lock().unwrap() = Some((std::time::Instant::now(), p3));
+                        }
+                    }
                     send(Msg::Boss(m));
                 }
             }
@@ -158,6 +169,45 @@ pub fn spawn(paths: Paths, shared: Arc<Shared>, tx: Sender<Msg>, repaint: impl F
             let ocr_sec = cfg.get("ocr_sec").and_then(|v| v.as_f64()).unwrap_or(3.0);
             let delay = if fast > 0 && fast <= 12 { 0.4 } else { ocr_sec.max(1.0) };
             shared.wait(Duration::from_secs_f64(delay));
+        }
+    });
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn spawn_zakum(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::time::Instant, bool)>>>, tx: Sender<Msg>, repaint: Arc<Mutex<Box<dyn Fn() + Send>>>) {
+    std::thread::spawn(move || {
+        use reader::Screen;
+        platform::below_normal_priority();
+        let mut zak = crate::zakum::Zakum::new(Some(paths.here.join("黑水偵測.log")));
+        let mut screen = GdiScreen(None, 0);
+        let mut shown: Option<crate::zakum::Line> = None;
+        let mut seen: Option<std::time::Instant> = None;
+        let started = std::time::Instant::now();
+        loop {
+            let round = std::time::Instant::now();
+            let g = *gate.lock().unwrap();
+            if let Some((t, p3)) = g.filter(|g| Some(g.0) != seen) {
+                seen = Some(t);
+                zak.saw(p3);
+            }
+            let show = if zak.active() && crate::boss::enabled(&shared.cfg.lock().unwrap()) {
+                let (x, y, w, h) = platform::game_rect().unwrap_or_else(platform::primary_screen);
+                let covers: Vec<crate::zakum::Rect> = platform::own_windows().into_iter().map(|r| (r.0 - x, r.1 - y, r.2 - x, r.3 - y)).filter(|r| r.0 < w && r.2 > 0 && r.1 < h && r.3 > 0).collect();
+                let t = started.elapsed().as_secs_f64();
+                screen
+                    .grab(x, y, w, h)
+                    .and_then(|img| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| zak.step(&img, t, &covers))).ok())
+                    .map(|show| crate::zakum::Line { show, phase3: zak.phase3, face: zak.face_seen() })
+            } else {
+                None
+            };
+            if show != shown {
+                shown = show;
+                let _ = tx.send(Msg::Zakum(show));
+                (repaint.lock().unwrap())();
+            }
+            let idle = if zak.active() { 250 } else { 1000 };
+            std::thread::sleep(Duration::from_millis(idle).saturating_sub(round.elapsed()));
         }
     });
 }

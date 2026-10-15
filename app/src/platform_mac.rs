@@ -340,7 +340,9 @@ pub fn set_alpha(hwnd: isize, alpha: f32) {
     }
 }
 
-pub fn dpi_aware() {}
+pub fn dpi_aware() {
+    title_h();
+}
 
 pub fn dll_dir(_dir: &std::path::Path) {}
 
@@ -498,4 +500,53 @@ pub fn below_normal_priority() {
     unsafe {
         pthread_set_qos_class_self_np(0x11, 0);
     }
+}
+
+static TITLE_H: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+
+fn title_h() -> f64 {
+    if let Some(h) = TITLE_H.get() {
+        return *h;
+    }
+    match MainThreadMarker::new() {
+        Some(mtm) => {
+            let f = objc2_foundation::NSRect::new(NSPoint::new(0.0, 0.0), objc2_foundation::NSSize::new(800.0, 600.0));
+            let c = NSWindow::contentRectForFrameRect_styleMask(f, NSWindowStyleMask::Titled, mtm);
+            *TITLE_H.get_or_init(|| (f.size.height - c.size.height).clamp(0.0, 60.0))
+        }
+        None => 28.0,
+    }
+}
+
+pub fn game_rect() -> Option<(i32, i32, i32, i32)> {
+    use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
+    use objc2_foundation::{NSDictionary, NSNumber};
+    let list = CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements, 0)?;
+    let text = |d: &NSDictionary, k: &str| d.objectForKey(&NSString::from_str(k)).and_then(|o| o.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default();
+    let num = |d: &NSDictionary, k: &str| d.objectForKey(&NSString::from_str(k)).and_then(|o| o.downcast::<NSNumber>().ok()).map_or(0.0, |n| n.doubleValue());
+    for i in 0..list.len() {
+        let d = unsafe { &*(list.value_at_index(i as isize) as *const NSDictionary) };
+        if num(d, "kCGWindowLayer") != 0.0 {
+            continue;
+        }
+        let owner = text(d, "kCGWindowOwnerName");
+        if !owner.starts_with("MapleStory Worlds") && !text(d, "kCGWindowName").starts_with("MapleStory Worlds") {
+            continue;
+        }
+        let Some(b) = d.objectForKey(&NSString::from_str("kCGWindowBounds")).and_then(|o| o.downcast::<NSDictionary>().ok()) else { continue };
+        let (x, y, w, h) = (num(&b, "X"), num(&b, "Y"), num(&b, "Width"), num(&b, "Height"));
+        if w < 320.0 || h < 180.0 {
+            continue;
+        }
+        let full = ocr::capture::screens().iter().any(|(_, s)| s.origin.x == x && s.origin.y == y && s.size.width == w && s.size.height == h);
+        let top = if full { 0.0 } else { title_h() };
+        let s = scale();
+        let r = (((x) * s).round() as i32, ((y + top) * s).round() as i32, (w * s).round() as i32, ((h - top) * s).round() as i32);
+        return (r.2 >= 320 && r.3 >= 180).then_some(r);
+    }
+    None
+}
+
+pub fn own_windows() -> Vec<(i32, i32, i32, i32)> {
+    vec![]
 }

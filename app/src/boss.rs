@@ -38,7 +38,7 @@ pub fn parse(s: &str) -> Option<Reading> {
 }
 
 pub fn enabled(cfg: &Map<String, Value>) -> bool {
-    cfg.get("boss_mode").and_then(|v| v.as_bool()).unwrap_or(false)
+    cfg.get("boss_mode").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
 pub enum Out {
@@ -61,7 +61,7 @@ impl Watcher {
         self.tick_in(cfg, engine, screen, area, same)
     }
 
-    fn tick_in(&mut self, cfg: &Map<String, Value>, engine: &mut Ocr, screen: &mut dyn reader::Screen, area: (i32, i32, i32, i32), same: bool) -> Option<Out> {
+    pub(crate) fn tick_in(&mut self, cfg: &Map<String, Value>, engine: &mut Ocr, screen: &mut dyn reader::Screen, area: (i32, i32, i32, i32), same: bool) -> Option<Out> {
         if let Some([x, y, w, h]) = region_of(cfg, "boss").filter(|r| same && r[1] - area.1 <= area.3 / TOP) {
             let Some(img) = screen.grab(x, y, w, h) else { return Some(Out::Read(None)) };
             let img = if h < SMALL { ocr::img::resize_linear(&img, img.w * 2, img.h * 2) } else { img };
@@ -325,6 +325,7 @@ fn finish(o: &mut Overlay, mut f: Fight) {
     }
     let Some(secs) = kill_secs(&f) else {
         o.t.logs.push(format!("{} 的血條不見了（打到 {}%），這次不記", f.name, f.last_pct));
+        write_wipe(&o.paths.here.join(crate::history::BOSS_CURVE_FILE), &f);
         return;
     };
     if let Some(n) = crate::history::raid_name(f.max) {
@@ -335,6 +336,14 @@ fn finish(o: &mut Overlay, mut f: Fight) {
     let msg = format!("擊殺{} 耗時 {}，DPM {}", f.name, ms(secs), short(Some(dmg as f64 / secs * 60.0)));
     o.t.logs.push(format!("打王：{msg}（從 {}% 開始）", f.start_pct));
     o.boss.ended = Some((o.now(), msg));
+}
+
+fn write_wipe(path: &std::path::Path, f: &Fight) {
+    let line = serde_json::json!({ "when": f.started, "name": f.name, "wipe": true }).to_string() + "
+";
+    if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = fh.write_all(line.as_bytes());
+    }
 }
 
 fn write_kill(path: &std::path::Path, f: &Fight, secs: f64) {
@@ -368,11 +377,20 @@ pub fn rows(o: &Overlay) -> Vec<(String, Color32, String)> {
         let (_, lh) = f.last();
         let rate = f.recent().or(f.avg()).filter(|&d| d > 0.0);
         let per_min = |v: Option<f64>| short(v.map(|d| d * 60.0));
-        return vec![
+        let mut v = vec![
             ("血量".into(), HP, format!("{} {}（{}%）", crate::history::raid_name(f.max).unwrap_or(&f.name), comma(lh), f.last_pct)),
             ("DPM".into(), EXP, format!("{} 平均 {}", per_min(f.recent()), per_min(f.avg()))),
             ("預估時間".into(), GOOD, format!("{}（已用 {}）", rate.map_or("–".into(), |d| ms(lh as f64 / d)), ms(f.elapsed()))),
         ];
+        if let Some((z, txt)) = o.zakum.and_then(|z| z.text().map(|t| (z, t))) {
+            let c = match z.show {
+                crate::zakum::Show::Next | crate::zakum::Show::Late => HP,
+                crate::zakum::Show::Left(_) => WARN,
+                crate::zakum::Show::Wait => GOOD,
+            };
+            v.push(("黑水".into(), c, txt));
+        }
+        return v;
     }
     match &o.boss.ended {
         Some((t, msg)) if now - t < 30.0 => vec![(String::new(), GOOD, msg.clone())],
@@ -604,7 +622,13 @@ mod tests {
                         write_kill(std::path::Path::new(p), &f, secs);
                     }
                 }
-                None => println!("{} {} 血量 {} 打到 {}% 不見了，不記（{} 次讀數）", clock(from), f.name, f.max, f.last_pct, f.samples.len()),
+                None => {
+                    println!("{} {} 血量 {} 打到 {}% 不見了，不記（{} 次讀數）", clock(from), f.name, f.max, f.last_pct, f.samples.len());
+                    if let Some(p) = csv.as_ref().filter(|_| f.samples.len() >= 2) {
+                        f.started = clock(from);
+                        write_wipe(&std::path::Path::new(p).with_file_name(crate::history::BOSS_CURVE_FILE), &f);
+                    }
+                }
             }
         };
         for f in &files {
