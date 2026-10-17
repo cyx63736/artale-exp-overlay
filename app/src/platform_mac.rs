@@ -342,6 +342,7 @@ pub fn set_alpha(hwnd: isize, alpha: f32) {
 
 pub fn dpi_aware() {
     title_h();
+    start_marks_timer();
 }
 
 pub fn dll_dir(_dir: &std::path::Path) {}
@@ -549,4 +550,156 @@ pub fn game_rect() -> Option<(i32, i32, i32, i32)> {
 
 pub fn own_windows() -> Vec<(i32, i32, i32, i32)> {
     vec![]
+}
+
+static MARKS: Mutex<(Option<crate::papulatus::Marks>, u64)> = Mutex::new((None, 0));
+
+pub fn marks(m: Option<crate::papulatus::Marks>) {
+    let mut g = MARKS.lock().unwrap();
+    if g.0 != m {
+        g.0 = m;
+        g.1 += 1;
+    }
+}
+
+struct MarksWin {
+    win: Retained<NSPanel>,
+    layers: Vec<Retained<objc2_quartz_core::CALayer>>,
+    sprite: Option<(f32, i32, i32, objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>)>,
+    shown: bool,
+    last: Option<(u64, i32, i32)>,
+    top_at: std::time::Instant,
+    start: std::time::Instant,
+}
+
+thread_local! {
+    static MARKS_WIN: std::cell::RefCell<Option<MarksWin>> = const { std::cell::RefCell::new(None) };
+    static MARKS_TIMER: std::cell::RefCell<Option<objc2_core_foundation::CFRetained<objc2_core_foundation::CFRunLoopTimer>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn start_marks_timer() {
+    use objc2_core_foundation::{kCFRunLoopCommonModes, CFAbsoluteTimeGetCurrent, CFRunLoop, CFRunLoopTimer};
+    if MainThreadMarker::new().is_none() || MARKS_TIMER.with(|t| t.borrow().is_some()) {
+        return;
+    }
+    let Some(rl) = CFRunLoop::main() else { return };
+    let timer = unsafe { CFRunLoopTimer::new(None, CFAbsoluteTimeGetCurrent() + 1.0, 1.0 / 60.0, 0, 0, Some(marks_tick), std::ptr::null_mut()) };
+    if let Some(t) = timer {
+        rl.add_timer(Some(&t), unsafe { kCFRunLoopCommonModes });
+        MARKS_TIMER.with(|slot| *slot.borrow_mut() = Some(t));
+    }
+}
+
+unsafe extern "C-unwind" fn marks_tick(_: *mut objc2_core_foundation::CFRunLoopTimer, _: *mut std::ffi::c_void) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let (m, ver) = {
+        let g = MARKS.lock().unwrap();
+        (g.0.clone(), g.1)
+    };
+    MARKS_WIN.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(m) = m.filter(|m| m.w > 0 && !m.xs.is_empty()) else {
+            if let Some(st) = slot.as_mut() {
+                if st.shown {
+                    st.win.orderOut(None);
+                    st.shown = false;
+                    st.last = None;
+                }
+            }
+            return;
+        };
+        let st = slot.get_or_insert_with(|| MarksWin { win: new_marks_panel(mtm), layers: vec![], sprite: None, shown: false, last: None, top_at: std::time::Instant::now(), start: std::time::Instant::now() });
+        draw_marks(st, &m, ver);
+    });
+}
+
+fn new_marks_panel(mtm: MainThreadMarker) -> Retained<NSPanel> {
+    use objc2_app_kit::NSBackingStoreType;
+    use objc2_foundation::{NSRect, NSSize};
+    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
+    let w = NSPanel::initWithContentRect_styleMask_backing_defer(NSPanel::alloc(mtm), rect, NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel, NSBackingStoreType::Buffered, false);
+    unsafe { w.setReleasedWhenClosed(false) };
+    w.setIgnoresMouseEvents(true);
+    w.setFloatingPanel(true);
+    w.setBecomesKeyOnlyIfNeeded(true);
+    w.setHidesOnDeactivate(false);
+    w.setLevel(STATUS);
+    w.setCollectionBehavior(all_spaces());
+    w.setOpaque(false);
+    w.setBackgroundColor(Some(&NSColor::clearColor()));
+    w.setHasShadow(false);
+    if let Some(v) = w.contentView() {
+        v.setWantsLayer(true);
+    }
+    w
+}
+
+fn sprite_image(u: f32) -> Option<(f32, i32, i32, objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage>)> {
+    use objc2_core_graphics::{CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+    let (w, h, px) = crate::papulatus::arrow_sprite(u);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    unsafe extern "C-unwind" fn free_px(info: *mut std::ffi::c_void, _: std::ptr::NonNull<std::ffi::c_void>, _: usize) {
+        drop(unsafe { Box::from_raw(info as *mut Vec<u32>) });
+    }
+    let px = Box::new(px);
+    let (ptr, len) = (px.as_ptr() as *const std::ffi::c_void, px.len() * 4);
+    let info = Box::into_raw(px) as *mut std::ffi::c_void;
+    let provider = unsafe { CGDataProvider::with_data(info, ptr, len, Some(free_px)) }?;
+    let space = CGColorSpace::new_device_rgb()?;
+    let bits = CGBitmapInfo(CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0);
+    let img = unsafe { CGImage::new(w, h, 8, 32, w * 4, Some(&space), bits, Some(&provider), std::ptr::null(), true, CGColorRenderingIntent::RenderingIntentDefault) }?;
+    Some((u, w as i32, h as i32, img))
+}
+
+fn draw_marks(st: &mut MarksWin, m: &crate::papulatus::Marks, ver: u64) {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_foundation::{NSRect, NSSize};
+    use objc2_quartz_core::{CALayer, CATransaction};
+    if st.sprite.as_ref().map(|s| s.0) != Some(m.u) {
+        st.sprite = sprite_image(m.u);
+        st.last = None;
+    }
+    let Some((_, sw, sh, img)) = st.sprite.as_ref() else { return };
+    let (sw, sh) = (*sw, *sh);
+    let amp = (3.0 * m.u).round().max(1.0) as i32;
+    let bob = (amp as f64 * (st.start.elapsed().as_secs_f64() * std::f64::consts::TAU / 1.2).sin()).round() as i32;
+    let (w, h) = (m.w, sh + 2 * amp);
+    let top = m.floor + (crate::papulatus::ARROW_TOP * m.u).round() as i32 - amp;
+    if st.last != Some((ver, bob, top)) {
+        st.last = Some((ver, bob, top));
+        let s = scale();
+        let frame = NSRect::new(NSPoint::new(m.left as f64 / s, main_h() - (top + h) as f64 / s), NSSize::new(w as f64 / s, h as f64 / s));
+        st.win.setFrame_display(frame, false);
+        if let Some(root) = st.win.contentView().and_then(|v| v.layer()) {
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            while st.layers.len() > m.xs.len() {
+                st.layers.pop().unwrap().removeFromSuperlayer();
+            }
+            while st.layers.len() < m.xs.len() {
+                let l = CALayer::new();
+                unsafe { l.setContents(Some(&*(objc2_core_foundation::CFRetained::as_ptr(img).as_ptr() as *const objc2::runtime::AnyObject))) };
+                l.setContentsScale(s);
+                root.addSublayer(&l);
+                st.layers.push(l);
+            }
+            for (l, &cx) in st.layers.iter().zip(&m.xs) {
+                unsafe { l.setContents(Some(&*(objc2_core_foundation::CFRetained::as_ptr(img).as_ptr() as *const objc2::runtime::AnyObject))) };
+                let (x0, y0) = (cx - sw / 2, amp + bob);
+                l.setFrame(CGRect::new(CGPoint::new(x0 as f64 / s, (h - y0 - sh) as f64 / s), CGSize::new(sw as f64 / s, sh as f64 / s)));
+            }
+            CATransaction::commit();
+        }
+    }
+    if !st.shown {
+        st.win.orderFrontRegardless();
+        st.shown = true;
+    }
+    if st.top_at.elapsed() >= std::time::Duration::from_secs(1) {
+        st.top_at = std::time::Instant::now();
+        st.win.setLevel(STATUS);
+        st.win.orderFrontRegardless();
+    }
 }

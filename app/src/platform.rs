@@ -325,7 +325,8 @@ mod win {
         unsafe extern "system" fn each(h: HWND, out: LPARAM) -> windows_sys::core::BOOL {
             let mut pid = 0u32;
             unsafe { GetWindowThreadProcessId(h, &mut pid) };
-            if pid == unsafe { GetCurrentProcessId() } && unsafe { IsWindowVisible(h) } != 0 && unsafe { IsIconic(h) } == 0 {
+            let clear = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32 & WS_EX_TRANSPARENT != 0;
+            if pid == unsafe { GetCurrentProcessId() } && !clear && unsafe { IsWindowVisible(h) } != 0 && unsafe { IsIconic(h) } == 0 {
                 let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                 if unsafe { GetWindowRect(h, &mut r) } != 0 && r.right > r.left && r.bottom > r.top {
                     unsafe { (*(out as *mut Vec<(i32, i32, i32, i32)>)).push((r.left, r.top, r.right, r.bottom)) };
@@ -363,6 +364,149 @@ mod win {
             windows_sys::Win32::Graphics::Gdi::ClientToScreen(h, &mut p);
             let (w, hh) = (r.right - r.left, r.bottom - r.top);
             (w >= 320 && hh >= 180).then_some((p.x, p.y, w, hh))
+        }
+    }
+
+    pub fn marks(m: Option<crate::papulatus::Marks>) {
+        use std::sync::{mpsc, Mutex, OnceLock};
+        static TX: OnceLock<Mutex<mpsc::Sender<Option<crate::papulatus::Marks>>>> = OnceLock::new();
+        let tx = TX.get_or_init(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || marks_loop(rx));
+            Mutex::new(tx)
+        });
+        let _ = tx.lock().unwrap().send(m);
+    }
+
+    fn marks_loop(rx: std::sync::mpsc::Receiver<Option<crate::papulatus::Marks>>) {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::Graphics::Gdi::*;
+        unsafe {
+            let inst = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
+            let cls = wide("ArtaleMarks");
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(DefWindowProcW);
+            wc.hInstance = inst;
+            wc.lpszClassName = cls.as_ptr();
+            RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                cls.as_ptr(),
+                wide("").as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                inst,
+                std::ptr::null(),
+            );
+            if hwnd.is_null() {
+                return;
+            }
+            let mem = CreateCompatibleDC(std::ptr::null_mut());
+            let mut dib: (HBITMAP, *mut u32, i32, i32) = (std::ptr::null_mut(), std::ptr::null_mut(), 0, 0);
+            let mut sprite: (f32, usize, usize, Vec<u32>) = (0.0, 0, 0, vec![]);
+            let mut cur: Option<crate::papulatus::Marks> = None;
+            let mut shown = false;
+            let mut last: Option<(i32, i32)> = None;
+            let mut top_at = Instant::now();
+            let start = Instant::now();
+            loop {
+                let mut msg: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                match rx.recv_timeout(Duration::from_millis(16)) {
+                    Ok(m) => {
+                        cur = m;
+                        while let Ok(m) = rx.try_recv() {
+                            cur = m;
+                        }
+                        last = None;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+                let Some(m) = cur.as_ref().filter(|m| m.w > 0 && !m.xs.is_empty()) else {
+                    if shown {
+                        ShowWindow(hwnd, SW_HIDE);
+                        shown = false;
+                    }
+                    continue;
+                };
+                if sprite.0 != m.u {
+                    let (w, h, px) = crate::papulatus::arrow_sprite(m.u);
+                    sprite = (m.u, w, h, px);
+                }
+                let (sw, sh) = (sprite.1 as i32, sprite.2 as i32);
+                if sw == 0 {
+                    continue;
+                }
+                let amp = (3.0 * m.u).round().max(1.0) as i32;
+                let bob = (amp as f64 * (start.elapsed().as_secs_f64() * std::f64::consts::TAU / 1.2).sin()).round() as i32;
+                let (w, h) = (m.w, sh + 2 * amp);
+                let top = m.floor + (crate::papulatus::ARROW_TOP * m.u).round() as i32 - amp;
+                if last == Some((bob, top)) {
+                    continue;
+                }
+                last = Some((bob, top));
+                if dib.2 != w || dib.3 != h {
+                    if !dib.0.is_null() {
+                        DeleteObject(dib.0 as _);
+                    }
+                    let mut bi: BITMAPINFO = std::mem::zeroed();
+                    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                    bi.bmiHeader.biWidth = w;
+                    bi.bmiHeader.biHeight = -h;
+                    bi.bmiHeader.biPlanes = 1;
+                    bi.bmiHeader.biBitCount = 32;
+                    bi.bmiHeader.biCompression = BI_RGB;
+                    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+                    let b = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+                    if b.is_null() {
+                        dib = (std::ptr::null_mut(), std::ptr::null_mut(), 0, 0);
+                        continue;
+                    }
+                    SelectObject(mem, b as _);
+                    dib = (b, bits as *mut u32, w, h);
+                }
+                let buf = std::slice::from_raw_parts_mut(dib.1, (w * h) as usize);
+                buf.fill(0);
+                for &cx in &m.xs {
+                    let x0 = cx - sw / 2;
+                    let y0 = amp + bob;
+                    for y in 0..sh {
+                        let yy = y0 + y;
+                        if yy < 0 || yy >= h {
+                            continue;
+                        }
+                        for x in 0..sw {
+                            let xx = x0 + x;
+                            if xx >= 0 && xx < w {
+                                buf[(yy * w + xx) as usize] = sprite.3[(y * sw + x) as usize];
+                            }
+                        }
+                    }
+                }
+                let pos = POINT { x: m.left, y: top };
+                let size = SIZE { cx: w, cy: h };
+                let src = POINT { x: 0, y: 0 };
+                let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+                UpdateLayeredWindow(hwnd, std::ptr::null_mut(), &pos, &size, mem, &src, 0, &blend, ULW_ALPHA);
+                if !shown {
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    shown = true;
+                }
+                if top_at.elapsed() >= Duration::from_secs(1) {
+                    top_at = Instant::now();
+                    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+            }
         }
     }
 }
@@ -435,6 +579,7 @@ mod other {
     pub fn own_windows() -> Vec<(i32, i32, i32, i32)> {
         vec![]
     }
+    pub fn marks(_m: Option<crate::papulatus::Marks>) {}
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]

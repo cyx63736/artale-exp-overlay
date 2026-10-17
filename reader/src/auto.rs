@@ -178,11 +178,26 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
     let Some((_, tab)) = all.iter().find(|(it, _)| it.text.contains("消耗")) else { return };
     let th = tab.3 - tab.1;
     let tcy = (tab.1 + tab.3) / 2.0;
-    let row: Vec<&(f32, f32, f32, f32)> = all
-        .iter()
-        .map(|(_, b)| b)
-        .filter(|b| ((b.1 + b.3) / 2.0 - tcy).abs() < th * 0.6 && (b.0 - tab.0).abs() < (tab.2 - tab.0) * 5.0)
-        .collect();
+    let tw = tab.2 - tab.0;
+    let mut same: Vec<&(f32, f32, f32, f32)> = all.iter().map(|(_, b)| b).filter(|b| ((b.1 + b.3) / 2.0 - tcy).abs() < th * 0.6 && (b.0 - tab.0).abs() < tw * 12.0).collect();
+    same.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut row: Vec<&(f32, f32, f32, f32)> = same.iter().copied().filter(|b| (b.0 - tab.0).abs() < tw * 5.0).collect();
+    let mut r = row.iter().map(|b| b.2).fold(tab.2, f32::max);
+    for &b in same.iter().filter(|b| (b.0 - tab.0) >= tw * 5.0) {
+        if b.0 - r >= tw * 1.5 {
+            break;
+        }
+        row.push(b);
+        r = r.max(b.2);
+    }
+    let mut l = row.iter().map(|b| b.0).fold(tab.0, f32::min);
+    for &b in same.iter().rev().filter(|b| (tab.0 - b.0) >= tw * 5.0) {
+        if l - b.2 >= tw * 1.5 {
+            break;
+        }
+        row.push(b);
+        l = l.min(b.0);
+    }
     let title = all
         .iter()
         .find(|(it, b)| it.text.contains("道具") && b.3 <= tab.1 + th * 0.5 && tab.1 - b.3 < th * 3.0 && (b.0 - tab.0).abs() < (tab.2 - tab.0) * 5.0)
@@ -194,12 +209,30 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
         .iter()
         .filter(|(it, b)| b.1 > top && b.0 >= left - th && b.2 <= right + th * 3.0 && is_meso(&it.text))
         .min_by(|a, b| a.1.1.total_cmp(&b.1.1))
-        .map(|(_, b)| *b);
+        .map(|(_, b)| *b)
+        .or_else(|| {
+            let coin = all
+                .iter()
+                .filter(|(it, b)| b.1 > top && b.0 >= left - th && b.0 <= right + th * 3.0 && (it.text.contains("金幣") || it.text.contains("金币")))
+                .min_by(|a, b| a.1.1.total_cmp(&b.1.1))?
+                .1;
+            let cy = (coin.1 + coin.3) / 2.0;
+            all.iter()
+                .filter(|(it, b)| ((b.1 + b.3) / 2.0 - cy).abs() < (coin.3 - coin.1) * 0.6 && b.2 <= coin.0 + th && b.0 >= left - th && number(&it.text).is_some())
+                .max_by(|a, b| a.1.2.total_cmp(&b.1.2))
+                .map(|(_, b)| *b)
+        });
     if let Some(m) = meso {
         let mh = m.3 - m.1;
         f.meso = Some(clamp_rect((m.0 - mh * 0.15, m.1 - mh * 0.25, m.2 + mh * 0.15, m.3 + mh * 0.25), img.w, img.h));
     }
     let bottom = meso.map_or(top + (right - left) * 1.4, |m| m.1 - (m.3 - m.1) * 0.5);
+    if std::env::var_os("AUTO_DEBUG").is_some() {
+        eprintln!("bag tab {tab:?} row {row:?} title {title:?} → ({left:.0},{top:.0})-({right:.0},{bottom:.0}) meso {meso:?}");
+        for (it, b) in all.iter().filter(|(_, b)| b.0 < right + th * 6.0 && b.2 > left - th * 3.0 && b.3 > tab.1 - th * 4.0 && b.1 < tab.3 + th * 2.0) {
+            eprintln!("  near {:?} @({:.0},{:.0})-({:.0},{:.0})", it.text, b.0, b.1, b.2, b.3);
+        }
+    }
     if bottom <= top {
         return;
     }
@@ -212,8 +245,8 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
     if nums.len() < 2 {
         return;
     }
-    let sx = spacing(nums.iter().map(|n| n.1.0).collect(), th * 0.4);
-    let sy = spacing(nums.iter().map(|n| n.1.3).collect(), th * 0.4);
+    let sx = spacing_min(nums.iter().map(|n| n.1.0).collect(), th * 1.2, th * 2.2);
+    let sy = spacing_min(nums.iter().map(|n| n.1.3).collect(), th * 1.2, th * 2.2);
     if std::env::var_os("AUTO_DEBUG").is_some() {
         eprintln!("bag th {th:.1} scale {scale:.2} sx {sx:?} sy {sy:?}");
         for (n, b) in &nums {
@@ -222,13 +255,37 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
     }
     let (Some(sx), Some(sy)) = (sx, sy) else { return };
     let mut nums = nums;
+    let merged: Vec<bool> = nums
+        .iter()
+        .map(|n| nums.iter().any(|o| o.1.0 > n.1.0 && (o.1.3 - n.1.3).abs() < (n.1.3 - n.1.1) * 0.5 && n.1.2 > o.1.0 + (n.1.3 - n.1.1) * 0.2))
+        .collect();
+    let mut keep = merged.iter().map(|m| !m);
+    nums.retain(|_| keep.next().unwrap_or(true));
+    if nums.is_empty() {
+        return;
+    }
     let nh = {
         let mut v: Vec<f32> = nums.iter().map(|n| n.1.3 - n.1.1).collect();
         v.sort_by(f32::total_cmp);
         v[v.len() / 2]
     };
-    let cols = groups(nums.iter().map(|n| n.1.0).collect(), sx * 0.4);
-    let rows = groups(nums.iter().map(|n| n.1.3).collect(), sy * 0.4);
+    let tall = |n: &(i64, (f32, f32, f32, f32))| n.1.3 - n.1.1 >= nh * 0.75;
+    let low = nums.iter().filter(|n| tall(n)).map(|n| n.1.3).fold(f32::MIN, f32::max) + sy * 0.5;
+    nums.retain(|n| tall(n) || n.1.3 < low);
+    let cols = lattice(&nums.iter().map(|n| n.1.0).collect::<Vec<_>>(), sx);
+    let rows = lattice(&nums.iter().map(|n| n.1.3).collect::<Vec<_>>(), sy);
+    for n in nums.iter_mut() {
+        let Some(x0) = cols.iter().copied().find(|c| n.1.0 - c > -sx * 0.2 && n.1.0 - c < sx * 0.6) else { continue };
+        if n.1.0 - x0 < nh * 0.8 && tall(n) {
+            continue;
+        }
+        let strip = (x0 - nh * 0.3, n.1.3 - nh * 1.3, x0 + sx * 0.85, n.1.3 + nh * 0.3);
+        if let Some(m) = gap_count(ocr, img, strip).filter(|m| *m != n.0 && m.to_string().ends_with(&n.0.to_string())) {
+            n.0 = m;
+            n.1.0 = x0;
+        }
+    }
+    nums.retain(|n| cols.iter().any(|c| (c - n.1.0).abs() < sx * 0.4) && rows.iter().any(|r| (r - n.1.3).abs() < sy * 0.4));
     for &by in &rows {
         for &x0 in &cols {
             if nums.iter().any(|n| (n.1.0 - x0).abs() < sx * 0.4 && (n.1.3 - by).abs() < sy * 0.4) {
@@ -240,8 +297,10 @@ fn find_bag(img: &Bgr, ocr: &mut Ocr, all: &[(Item, (f32, f32, f32, f32))], f: &
             }
         }
     }
+    let snap = |v: f32, at: &[f32], gap: f32| at.iter().copied().find(|a| (a - v).abs() < gap).unwrap_or(v);
     for (n, b) in nums {
-        let r = (b.0 - sx * 0.05, b.3 + sy * 0.04 - sy * 0.88, b.0 - sx * 0.05 + sx * 0.88, b.3 + sy * 0.04);
+        let (x0, by) = (snap(b.0, &cols, sx * 0.4), snap(b.3, &rows, sy * 0.4));
+        let r = (x0 - sx * 0.05, by + sy * 0.04 - sy * 0.88, x0 - sx * 0.05 + sx * 0.88, by + sy * 0.04);
         f.cells.push(Cell { rect: clamp_rect(r, img.w, img.h), count: n });
     }
 }
@@ -258,7 +317,20 @@ fn groups(mut v: Vec<f32>, gap: f32) -> Vec<f32> {
     out.into_iter().map(|g| g[g.len() / 2]).collect()
 }
 
-fn spacing(mut v: Vec<f32>, gap: f32) -> Option<f32> {
+fn lattice(v: &[f32], s: f32) -> Vec<f32> {
+    let off = |x: f32, a: f32| {
+        let d = (x - a) / s;
+        (d - d.round()).abs() * s
+    };
+    let Some(&a) = v.iter().max_by_key(|&&a| v.iter().filter(|&&x| off(x, a) < s * 0.15).count()) else { return vec![] };
+    groups(v.iter().copied().filter(|&x| off(x, a) < s * 0.2).collect(), s * 0.4)
+}
+
+fn spacing(v: Vec<f32>, gap: f32) -> Option<f32> {
+    spacing_min(v, gap, 0.0)
+}
+
+fn spacing_min(mut v: Vec<f32>, gap: f32, min: f32) -> Option<f32> {
     v.sort_by(f32::total_cmp);
     let mut groups: Vec<f32> = vec![];
     for x in v {
@@ -273,7 +345,7 @@ fn spacing(mut v: Vec<f32>, gap: f32) -> Option<f32> {
     }
     d.sort_by(f32::total_cmp);
     let mut best: Option<(usize, Vec<f32>)> = None;
-    for &c in &d {
+    for &c in d.iter().filter(|&&c| c >= min) {
         let near = |x: f32, k: f32| (x - c * k).abs() < c * 0.25;
         let ones: Vec<f32> = d.iter().copied().filter(|&x| near(x, 1.0)).collect();
         let support = d.iter().filter(|&&x| near(x, 1.0) || near(x, 2.0) || near(x, 3.0)).count();
@@ -346,13 +418,25 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
     }
     let nh = median(nums.iter().map(|n| n.1.3 - n.1.1).collect());
     let cs = nh * 3.1;
-    let px = spacing(nums.iter().map(|n| (n.1.0 + n.1.2) / 2.0).collect(), cs * 0.5).unwrap_or(cs * 1.2);
-    let py = spacing(nums.iter().map(|n| n.1.3).collect(), cs * 0.5).unwrap_or(cs * 1.05);
+    let (ex, ey) = (median(cells.iter().map(|c| c.rect.2 as f32).collect()) * 0.85, bag_h * 0.76);
+    let fit = |p: Option<f32>, e: f32| p.filter(|&p| p > e * 0.8 && p < e * 1.25);
+    let px = fit(spacing(nums.iter().map(|n| (n.1.0 + n.1.2) / 2.0).collect(), cs * 0.5), ex).unwrap_or(ex);
+    let py = fit(spacing(nums.iter().map(|n| n.1.3).collect(), cs * 0.5), ey).unwrap_or(ey);
     let seeds: Vec<(f32, f32)> = nums.iter().map(|n| ((n.1.0 + n.1.2) / 2.0, n.1.3)).collect();
     let lefts: Vec<f32> = nums.iter().map(|n| n.1.0).collect();
-    let pxl = spacing(lefts.clone(), cs * 0.5);
-    let pyb = spacing(seeds.iter().map(|s| s.1).collect(), cs * 0.5);
-    let (cw, ch) = (pxl.map_or(nh * 2.7, |p| p * 0.87), pyb.map_or(nh * 2.6, |p| p * 0.89));
+    let pxl = fit(spacing(lefts.clone(), cs * 0.5), ex);
+    let pyb = fit(spacing(seeds.iter().map(|s| s.1).collect(), cs * 0.5), ey);
+    let (cw, ch) = (pxl.unwrap_or(ex) * 0.87, pyb.unwrap_or(ey) * 0.89);
+    let gxp = pxl.unwrap_or(ex);
+    let ax = lefts
+        .iter()
+        .copied()
+        .max_by_key(|&a| lefts.iter().filter(|&&x| ((x - a) / gxp - ((x - a) / gxp).round()).abs() < 0.15).count())
+        .unwrap_or(0.0);
+    let col = |v: f32| {
+        let k = (v - ax) / gxp;
+        ax + (if (k - k.round()).abs() < 0.25 { k.round() } else { k.ceil() }) * gxp
+    };
     let snap = |v: f32, refs: &[f32], pitch: Option<f32>| -> f32 {
         let Some(p) = pitch else { return v };
         let r = refs.iter().copied().min_by(|a, b| (a - v).abs().total_cmp(&(b - v).abs())).unwrap_or(v);
@@ -383,7 +467,7 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
                     while l + step < cx && read_n(ocr, (l + step, strip.1, strip.2, strip.3)) == Some(n) {
                         l += step;
                     }
-                    let l = snap((l - nh * 0.25).max(strip.0), &lefts, pxl);
+                    let l = col((l - nh * 0.25).max(strip.0));
                     nums.push((n, (l, by - nh, l + n.to_string().len() as f32 * nh * 0.63, by)));
                 }
             }
@@ -394,7 +478,7 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
     let group = bag_groups(&imgs, &sigs);
     let mut pairs: Vec<Pair> = vec![];
     for (n, b) in nums {
-        let (l, bt) = (snap(b.0, &lefts, pxl), snap(b.3, &bottoms, pyb) - 1.0);
+        let (l, bt) = (col(b.0), snap(b.3, &bottoms, pyb) - 1.0);
         let qr = clamp_rect((l, bt - ch, l + cw, bt), img.w, img.h);
         let qc = cell_img(img, qr);
         let qsig = sig(img, qr);
@@ -446,12 +530,14 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
     }
     if pairs.len() >= 3 {
         let dx = median(pairs.iter().map(|p| (p.qs.rect.0 - p.cell.0) as f32).collect()) as i32;
+        let w = median(pairs.iter().map(|p| p.qs.rect.2 as f32).collect()) as i32;
         for p in pairs.iter_mut() {
             if ((p.qs.rect.0 - p.cell.0 - dx) as f32).abs() > nh * 0.5 {
                 if debug {
                     eprintln!("qs {} 數字那一條偏了 {:?} → x {}", p.qs.count, p.qs.rect, p.cell.0 + dx);
                 }
                 p.qs.rect.0 = p.cell.0 + dx;
+                p.qs.rect.2 = w;
             }
         }
     }
@@ -476,6 +562,10 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
                 }
                 let qr = (l.round() as i32, t.round() as i32, first.2, first.3);
                 let qc = cell_img(img, qr);
+                let dark = qc.data.chunks_exact(3).filter(|p| p.iter().all(|&c| c < 90)).count() as f32 / (qc.w * qc.h) as f32;
+                if !(0.07..0.8).contains(&dark) {
+                    continue;
+                }
                 let qsig = sig(img, qr);
                 let dl: Vec<f32> = imgs.iter().map(|c| look(&qc, c)).collect();
                 let mut gs: Vec<(usize, f32, f32)> = vec![];
@@ -491,7 +581,7 @@ fn find_quickslot(img: &Bgr, ocr: &mut Ocr, exp: Rect, cells: &[Cell]) -> Vec<Pa
                 }
                 gs.sort_by(|a, b| a.1.total_cmp(&b.1));
                 let Some(&(g1, d1, h1)) = gs.first() else { continue };
-                let clear = d1 < 0.28 && gs.iter().skip(1).all(|g2| g2.1 - d1 >= 0.06 || (g2.1 - d1 >= 0.03 && g2.2 - h1 >= 0.3));
+                let clear = d1 < 0.22 && gs.iter().skip(1).all(|g2| g2.1 - d1 >= 0.06 || (g2.1 - d1 >= 0.03 && g2.2 - h1 >= 0.3));
                 if debug {
                     eprintln!("qs icon {qr:?} groups {:?} clear {clear}", gs.iter().take(3).map(|x| (x.0, (x.1 * 100.0).round() / 100.0, (x.2 * 10.0).round() / 10.0)).collect::<Vec<_>>());
                 }

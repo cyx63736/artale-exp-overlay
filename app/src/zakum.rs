@@ -6,17 +6,17 @@ use std::time::Instant;
 const W: usize = 640;
 const H: usize = 360;
 
-struct Tpl {
-    w: usize,
-    h: usize,
+pub(crate) struct Tpl {
+    pub(crate) w: usize,
+    pub(crate) h: usize,
     d: Vec<f32>,
-    raw: Vec<f32>,
-    x: i32,
-    y: i32,
+    pub(crate) raw: Vec<f32>,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
 }
 
 impl Tpl {
-    fn new(raw: &[u8], w: usize, x: i32, y: i32) -> Tpl {
+    pub(crate) fn new(raw: &[u8], w: usize, x: i32, y: i32) -> Tpl {
         Tpl::of(raw.iter().map(|&v| v as f32).collect(), w, x, y)
     }
     fn of(raw: Vec<f32>, w: usize, x: i32, y: i32) -> Tpl {
@@ -27,13 +27,13 @@ impl Tpl {
         d.iter_mut().for_each(|v| *v /= n);
         Tpl { w, h, d, raw, x, y }
     }
-    fn half(&self) -> Tpl {
+    pub(crate) fn half(&self) -> Tpl {
         let g = half(&Plane { w: self.w, h: self.h, d: self.raw.clone() });
         Tpl::of(g.d, g.w, self.x / 2, self.y / 2)
     }
 }
 
-fn half(g: &Plane<f32>) -> Plane<f32> {
+pub(crate) fn half(g: &Plane<f32>) -> Plane<f32> {
     let (w, h) = (g.w / 2, g.h / 2);
     let mut o = Plane::new(w, h);
     for y in 0..h {
@@ -44,7 +44,7 @@ fn half(g: &Plane<f32>) -> Plane<f32> {
     o
 }
 
-fn resize(g: &Plane<f32>, nw: usize, nh: usize) -> Plane<f32> {
+pub(crate) fn resize(g: &Plane<f32>, nw: usize, nh: usize) -> Plane<f32> {
     let mut o = Plane::new(nw, nh);
     let (sx, sy) = (g.w as f32 / nw as f32, g.h as f32 / nh as f32);
     for y in 0..nh {
@@ -63,14 +63,14 @@ fn resize(g: &Plane<f32>, nw: usize, nh: usize) -> Plane<f32> {
     o
 }
 
-const SCALES: [f32; 36] = [0.60, 0.62, 0.64, 0.66, 0.68, 0.70, 0.72, 0.74, 0.76, 0.78, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06, 1.08, 1.10, 1.12, 1.14, 1.16, 1.18, 1.20, 1.22, 1.24, 1.26, 1.28, 1.30];
+pub(crate) const SCALES: [f32; 36] = [0.60, 0.62, 0.64, 0.66, 0.68, 0.70, 0.72, 0.74, 0.76, 0.78, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96, 0.98, 1.00, 1.02, 1.04, 1.06, 1.08, 1.10, 1.12, 1.14, 1.16, 1.18, 1.20, 1.22, 1.24, 1.26, 1.28, 1.30];
 
-struct Sums {
+pub(crate) struct Sums {
     s: Vec<f64>,
     s2: Vec<f64>,
 }
 
-fn sums(g: &Plane<f32>) -> Sums {
+pub(crate) fn sums(g: &Plane<f32>) -> Sums {
     let (w, h) = (g.w + 1, g.h + 1);
     let mut s = vec![0.0; w * h];
     let mut s2 = vec![0.0; w * h];
@@ -89,7 +89,7 @@ fn sums(g: &Plane<f32>) -> Sums {
 
 pub type Rect = (i32, i32, i32, i32);
 
-fn best(g: &Plane<f32>, ss: &Sums, t: &Tpl, x0: i32, y0: i32, x1: i32, y1: i32, covers: &[Rect]) -> (f32, i32, i32) {
+pub(crate) fn best(g: &Plane<f32>, ss: &Sums, t: &Tpl, x0: i32, y0: i32, x1: i32, y1: i32, covers: &[Rect]) -> (f32, i32, i32) {
     let x0 = x0.max(0);
     let y0 = y0.max(0);
     let x1 = x1.min(g.w as i32 - t.w as i32);
@@ -168,7 +168,7 @@ pub fn prep(img: &ocr::img::Bgr) -> (Plane<f32>, f32) {
     (g, n as f32 / tot.max(1) as f32)
 }
 
-fn area(img: &ocr::img::Bgr, nw: usize, nh: usize) -> ocr::img::Bgr {
+pub(crate) fn area(img: &ocr::img::Bgr, nw: usize, nh: usize) -> ocr::img::Bgr {
     let mut o = ocr::img::Bgr::new(nw, nh);
     for y in 0..nh {
         let (sy0, sy1) = (y * img.h / nh, ((y + 1) * img.h / nh).max(y * img.h / nh + 1));
@@ -252,16 +252,40 @@ pub struct Zakum {
     covers: Vec<Rect>,
     pub opt: Opt,
     scale: Option<f32>,
-    calib: (Vec<f32>, usize),
+    calib: Calib,
+    size: (usize, usize),
+    face_ok: bool,
     last_face: f64,
+    stale: bool,
+    last_pct: Option<u32>,
+    rel: Vec<(f32, f32, u32)>,
     known_dx: Option<i32>,
     last_full: f64,
     face3: Tpl,
     face_p3: bool,
     face_diff: f32,
+    body_at: Option<f64>,
+    body_pending: bool,
 }
 
 const CUBE_GREEN: f32 = 0.015;
+const CUBE_FAINT: f32 = 0.007;
+const BODY_GREEN: f32 = 0.010;
+const BODY_GREEN_SECS: f64 = 45.0;
+const BODY_GUESS_AFTER: f64 = 36.0;
+const BODY_GUESS: f64 = 20.0;
+
+#[derive(Default)]
+struct Calib {
+    sum: Vec<f32>,
+    frames: Vec<(Plane<f32>, Vec<Vec<(i32, i32)>>)>,
+}
+
+impl Calib {
+    fn new() -> Calib {
+        Calib { sum: vec![0.0; SCALES.len()], frames: vec![] }
+    }
+}
 
 impl Zakum {
     pub fn new(log: Option<std::path::PathBuf>) -> Zakum {
@@ -287,13 +311,20 @@ impl Zakum {
             covers: vec![],
             opt: Opt::default(),
             scale: None,
-            calib: (vec![0.0; SCALES.len()], 0),
+            calib: Calib::new(),
+            size: (0, 0),
+            face_ok: false,
             last_face: 0.0,
+            stale: false,
+            last_pct: None,
+            rel: vec![(0.0, 0.0, 0); 7],
             known_dx: None,
             last_full: f64::NEG_INFINITY,
             face3: Tpl::new(include_bytes!("zakum/face3.bin"), 50, 282, 182),
             face_p3: false,
             face_diff: 0.0,
+            body_at: None,
+            body_pending: false,
         }
     }
 
@@ -301,13 +332,23 @@ impl Zakum {
         self.frames.back().map_or(false, |f| f.t - self.last_face <= 3.0)
     }
 
-    pub fn saw(&mut self, phase3: bool) {
+    pub fn saw(&mut self, phase3: bool, pct: u32) {
         if self.last_seen.map_or(true, |t| t.elapsed().as_secs_f64() > 60.0) {
             self.reset();
             self.logln("開始");
         }
         self.phase3 = phase3;
+        self.body(pct);
         self.last_seen = Some(Instant::now());
+    }
+
+    fn body(&mut self, pct: u32) {
+        if self.last_pct.map_or(false, |p| p <= 5) && pct >= 90 {
+            self.casts.clear();
+            self.body_pending = true;
+            self.logln("換身體");
+        }
+        self.last_pct = Some(pct);
     }
 
     pub fn active(&self) -> bool {
@@ -320,44 +361,84 @@ impl Zakum {
         self.last_anchor = None;
         self.last_show = None;
         self.scale = None;
-        self.calib = (vec![0.0; SCALES.len()], 0);
+        self.calib = Calib::new();
         self.known_dx = None;
+        self.last_pct = None;
+        self.rel.iter_mut().for_each(|r| *r = (0.0, 0.0, 0));
         self.face_p3 = false;
         self.face_diff = 0.0;
+        self.body_at = None;
+        self.body_pending = false;
     }
 
-    fn calibrate(&mut self, g: &Plane<f32>, t: f64) {
-        let small: Vec<Tpl> = self.tpl.iter().map(|t| t.half()).collect();
-        let nf = small.len() - 1;
-        let f3 = self.face3.half();
+    fn calibrate(&mut self, g: &Plane<f32>, t: f64, size: (usize, usize)) {
+        let mut small: Vec<Tpl> = self.tpl.iter().map(|t| t.half()).collect();
+        small.push(self.face3.half());
+        let nf = self.tpl.len() - 1;
+        let mut pos = vec![];
         for (i, &s) in SCALES.iter().enumerate() {
             let r = half(&resize(g, (W as f32 / s).round() as usize, (H as f32 / s).round() as usize));
             let ss = sums(&r);
-            let mut sc: Vec<f32> = (0..nf)
-                .map(|k| {
-                    let tp = &small[k];
-                    best(&r, &ss, tp, tp.x - 40, tp.y - 90, tp.x + 40, tp.y + 90, &[]).0
-                })
-                .collect();
+            let found: Vec<(f32, i32, i32)> = small.iter().map(|tp| best(&r, &ss, tp, tp.x - 40, tp.y - 90, tp.x + 40, tp.y + 90, &[])).collect();
+            let mut sc: Vec<f32> = found[..nf].iter().map(|f| f.0).collect();
             sc.sort_by(|a, b| b.total_cmp(a));
-            let face = [&small[nf], &f3].iter().map(|f| best(&r, &ss, f, f.x - 40, f.y - 90, f.x + 40, f.y + 90, &[]).0).fold(f32::MIN, f32::max);
-            self.calib.0[i] += face + sc[0] + sc[1];
+            self.calib.sum[i] += found[nf].0.max(found[nf + 1].0) + sc[0] + sc[1];
+            pos.push(found.iter().map(|f| (f.1, f.2)).collect());
         }
-        self.calib.1 += 1;
-        if self.calib.1 >= 3 {
-            let bi = (0..SCALES.len()).max_by(|&a, &b| self.calib.0[a].total_cmp(&self.calib.0[b])).unwrap();
-            if self.calib.0[bi] / 3.0 < 2.2 {
-                self.calib = (vec![0.0; SCALES.len()], 0);
+        self.calib.frames.push((g.clone(), pos));
+        if self.calib.frames.len() >= 3 {
+            let bi = (0..SCALES.len()).max_by(|&a, &b| self.calib.sum[a].total_cmp(&self.calib.sum[b])).unwrap();
+            if self.calib.sum[bi] / 3.0 < 2.2 {
+                self.calib = Calib::new();
                 return;
             }
-            self.scale = Some(SCALES[bi]);
+            let s = self.refine(bi);
+            self.scale = Some(s);
+            self.rel.iter_mut().for_each(|r| *r = (0.0, 0.0, 0));
+            self.size = size;
+            self.face_ok = false;
             self.last_anchor = None;
             self.known_dx = None;
             self.last_face = t;
-            let line = format!("畫面比例 {:.2}（分數 {:.2}）", SCALES[bi], self.calib.0[bi] / 3.0);
+            let line = format!("畫面比例 {s:.3}（粗找 {:.2} 分數 {:.2}）", SCALES[bi], self.calib.sum[bi] / 3.0);
             self.logln(&line);
-            self.calib = (vec![0.0; SCALES.len()], 0);
+            self.calib = Calib::new();
         }
+    }
+
+    fn refine(&self, bi: usize) -> f32 {
+        let nf = self.tpl.len() - 1;
+        let tpls: Vec<&Tpl> = self.tpl.iter().chain([&self.face3]).collect();
+        let s0 = SCALES[bi];
+        let ys: Vec<f32> = (-2..=2)
+            .map(|d| {
+                let s = s0 + d as f32 * 0.01;
+                let k = s0 / s;
+                self.calib
+                    .frames
+                    .iter()
+                    .map(|(g, pos)| {
+                        let r = resize(g, (W as f32 / s).round() as usize, (H as f32 / s).round() as usize);
+                        let ss = sums(&r);
+                        let sc: Vec<f32> = tpls
+                            .iter()
+                            .zip(&pos[bi])
+                            .map(|(tp, &(hx, hy))| {
+                                let (ex, ey) = ((hx as f32 * 2.0 * k).round() as i32, (hy as f32 * 2.0 * k).round() as i32);
+                                best(&r, &ss, tp, ex - 5, ey - 5, ex + 5, ey + 5, &[]).0
+                            })
+                            .collect();
+                        let mut bg = sc[..nf].to_vec();
+                        bg.sort_by(|a, b| b.total_cmp(a));
+                        sc[nf].max(sc[nf + 1]) + bg[0] + bg[1]
+                    })
+                    .sum()
+            })
+            .collect();
+        let b: f32 = (0..5).map(|i| (i as f32 - 2.0) * ys[i]).sum::<f32>() / 10.0;
+        let a: f32 = (0..5).map(|i| ((i as f32 - 2.0).powi(2) - 2.0) * ys[i]).sum::<f32>() / 14.0;
+        let d = if a < 0.0 { (-b / (2.0 * a)).clamp(-1.5, 1.5) } else { (0..5).max_by(|&i, &j| ys[i].total_cmp(&ys[j])).unwrap() as f32 - 2.0 };
+        s0 + d * 0.01
     }
 
     fn logln(&mut self, s: &str) {
@@ -419,20 +500,44 @@ impl Zakum {
                 }
             }
         }
-        self.anchor_id = anchor.map(|a| a.0);
+        let stale = match anchor {
+            Some(_) => None,
+            None => self.last_anchor.filter(|&(_, x, y, at)| {
+                t - at <= 3.0 && self.tpl[..nf].iter().any(|tp| best(g, &ss, tp, tp.x + x - 2, tp.y + y - 2, tp.x + x + 2, tp.y + y + 2, covers).0 >= 0.5)
+            }),
+        };
+        self.anchor_id = anchor.map(|a| a.0).or(stale.map(|a| a.0));
+        self.stale = stale.is_some();
         if let Some(a) = anchor {
             self.known_dx = Some(a.1);
         }
-        let (ax, ay) = match anchor {
-            Some((k, x, y)) => {
+        let (ax, ay) = match (anchor, stale) {
+            (Some((k, x, y)), _) => {
                 self.last_anchor = Some((k, x, y, t));
                 (x, y)
             }
-            None => match self.last_anchor.filter(|a| t - a.3 <= 3.0) {
-                Some((_, x, y, _)) => (x, y),
-                None => return None,
-            },
+            (None, Some((_, x, y, _))) => (x, y),
+            (None, None) => return None,
         };
+        if anchor.is_some() {
+            let good: Vec<(usize, f32, f32)> = (0..nf)
+                .filter_map(|j| {
+                    let tp = &self.tpl[j];
+                    let b = best(g, &ss, tp, tp.x + ax - 3, tp.y + ay - 3, tp.x + ax + 3, tp.y + ay + 3, covers);
+                    (b.0 >= 0.8).then(|| (j, (b.1 - tp.x) as f32, (b.2 - tp.y) as f32))
+                })
+                .collect();
+            if good.len() >= 2 {
+                let n = good.len() as f32;
+                let (mx, my) = good.iter().fold((0.0, 0.0), |m, &(j, x, y)| (m.0 + (x - self.rel[j].0) / n, m.1 + (y - self.rel[j].1) / n));
+                for &(j, x, y) in &good {
+                    let r = &mut self.rel[j];
+                    let a = 1.0 / (r.2.min(19) + 1) as f32;
+                    *r = (r.0 + (x - mx - r.0) * a, r.1 + (y - my - r.1) * a, r.2 + 1);
+                }
+            }
+        }
+        let (cx, cy) = self.anchor_id.map(|k| self.rel[k]).filter(|r| r.2 >= 5).map_or((0.0, 0.0), |r| (r.0, r.1));
         let near = |f: &Tpl| best(g, &ss, f, f.x + ax - 20, f.y + ay - 35, f.x + ax + 20, f.y + ay + 15, covers);
         let (r1, r3) = (near(&self.tpl[nf]), near(&self.face3));
         if r1.0 > 0.6 || r3.0 > 0.6 {
@@ -448,7 +553,7 @@ impl Zakum {
         if r.0 < 0.0 {
             return None;
         }
-        Some(((r.1 - f.x - ax) * 2, (r.2 - f.y - ay) * 2, r.0))
+        Some(((((r.1 - f.x - ax) as f32 + cx) * 2.0).round() as i32, (((r.2 - f.y - ay) as f32 + cy) * 2.0).round() as i32, r.0))
     }
 
     pub fn step(&mut self, img: &ocr::img::Bgr, t: f64, covers: &[Rect]) -> Show {
@@ -462,11 +567,12 @@ impl Zakum {
             self.logln(&s);
             self.covers = small.clone();
         }
-        if self.scale.is_some() && t - self.last_face > 10.0 {
+        if self.scale.is_some() && ((img.w, img.h) != self.size || t - self.last_face > if self.face_ok { 30.0 } else { 10.0 }) {
             self.scale = None;
         }
         let Some(scale) = self.scale else {
-            self.calibrate(&g, t);
+            self.anchor_id = None;
+            self.calibrate(&g, t, (img.w, img.h));
             return self.push(Frame { t, face: None, green, anchor: None });
         };
         let (g, small) = if (scale - 1.0).abs() < 0.001 {
@@ -479,6 +585,7 @@ impl Zakum {
         let face = self.look(&g, t, &small);
         if face.map_or(false, |f| f.2 >= 0.75) {
             self.last_face = t;
+            self.face_ok = true;
         }
         let anchor = face.and(self.anchor_id);
         self.push(Frame { t, face, green, anchor })
@@ -542,6 +649,33 @@ impl Zakum {
                 self.logln(&s);
             }
         }
+        if std::mem::take(&mut self.body_pending) {
+            self.body_at = Some(t);
+        }
+        if self.body_at.is_some_and(|b| self.casts.iter().any(|c| c.t >= b && c.cube == Some(true))) {
+            self.body_at = None;
+        }
+        if let Some(b) = self.body_at {
+            let near = self.casts.iter().any(|c| c.cube.is_none() && c.tilt() && t - c.t <= 8.0);
+            let win: Vec<&Frame> = self.frames.iter().filter(|f| f.t > t - 2.0).collect();
+            let on: Vec<f64> = win.iter().filter(|f| f.green >= BODY_GREEN).map(|f| f.t).collect();
+            let found = if near {
+                None
+            } else if t - b <= BODY_GREEN_SECS && win.len() >= 3 && on.len() * 4 >= win.len() * 3 {
+                Some((on[0], "G", "換身體後綠色魔方"))
+            } else if t - b >= BODY_GUESS_AFTER {
+                Some((b + BODY_GUESS, "B", "換身體後沒看到魔方，當作有放"))
+            } else {
+                None
+            };
+            if let Some((t0, k, why)) = found {
+                let at = self.casts.partition_point(|c| c.t <= t0);
+                self.casts.insert(at, Cast { t: t0, end: t0, kinds: k.into(), cube: Some(true) });
+                let s = format!("{why} {t0:.1}");
+                self.logln(&s);
+                self.body_at = None;
+            }
+        }
         for i in 0..self.casts.len() {
             if self.casts[i].cube.is_none() && self.casts[i].tilt() {
                 let c = self.cube(self.casts[i].t, t);
@@ -550,7 +684,7 @@ impl Zakum {
         }
         let show = self.judge(t);
         let line = match fr.face {
-            Some((dx, dy, q)) => format!("{t:.1} {dx} {dy} {q:.2} g{:.3} {kind} {:?} a{}", fr.green, show, self.anchor_id.map_or("-".into(), |a| a.to_string())),
+            Some((dx, dy, q)) => format!("{t:.1} {dx} {dy} {q:.2} g{:.3} {kind} {:?} a{}", fr.green, show, self.anchor_id.map_or("-".into(), |a| format!("{a}{}", if self.stale { "*" } else { "" }))),
             None => format!("{t:.1} - g{:.3} {:?}", fr.green, show),
         };
         self.logln(&line);
@@ -564,8 +698,10 @@ impl Zakum {
 
     fn cube(&self, ct: f64, now: f64) -> Option<bool> {
         let w = self.opt.cube_win;
-        let n = self.frames.iter().filter(|f| f.t >= ct - 1.0 && f.t <= ct + w && f.green >= CUBE_GREEN).count();
-        if n >= 3 {
+        let near: Vec<f32> = self.frames.iter().filter(|f| f.t >= ct - 1.0 && f.t <= ct + w).map(|f| f.green).collect();
+        let n = near.iter().filter(|&&g| g >= CUBE_GREEN).count();
+        let faint = near.iter().filter(|&&g| g >= CUBE_FAINT).count();
+        if n >= 3 || now >= ct + w && faint >= 3 && faint * 2 >= near.len() {
             Some(true)
         } else if now >= ct + w {
             Some(false)
@@ -620,7 +756,7 @@ impl Zakum {
             Show::Left(need - n)
         } else if n == need {
             Show::Next
-        } else if n == need + 1 {
+        } else if n == need + 1 || now - tc <= 75.0 {
             Show::Late
         } else {
             Show::Wait
@@ -695,12 +831,13 @@ mod tests {
         let (a, b) = seg.split_once('-').unwrap();
         let (a, b): (f64, f64) = (a.parse().unwrap(), b.parse().unwrap());
         let p3from: f64 = std::env::var("ZAKUM_P3FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::INFINITY);
-        let (w, h, fps) = (1280usize, 720usize, 4.0);
+        let (w, h) = std::env::var("ZAKUM_SIZE").ok().and_then(|v| v.split_once('x').map(|(a, b)| (a.parse().unwrap(), b.parse().unwrap()))).unwrap_or((1280usize, 720usize));
+        let fps = 4.0;
         let mut cmd = std::process::Command::new("ffmpeg");
         #[cfg(windows)]
         std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
         let mut ff = cmd
-            .args(["-v", "error", "-ss", &a.to_string(), "-t", &(b - a).to_string(), "-i", &video, "-vf", &format!("fps={fps},scale={w}:{h}"), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"])
+            .args(["-v", "error", "-ss", &a.to_string(), "-t", &(b - a).to_string(), "-i", &video, "-vf", &format!("fps={fps},scale={w}:{h}:flags=area"), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"])
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -711,14 +848,23 @@ mod tests {
         z.opt.stretch = std::env::var("ZAKUM_STRETCH").is_ok();
         if let Some(w) = std::env::var("ZAKUM_CUBEWIN").ok().and_then(|v| v.parse().ok()) { z.opt.cube_win = w; }
         z.opt.p3green = std::env::var("ZAKUM_P3G").is_ok();
+        if let Some(s) = std::env::var("ZAKUM_SCALE").ok().and_then(|v| v.parse().ok()) {
+            z.scale = Some(s);
+            z.size = (w, h);
+            z.last_face = a;
+        }
         z.logln(&format!("測試 {seg} 第三階段從 {p3from}"));
+        let covers: Vec<Rect> = std::env::var("ZAKUM_COVER").ok().filter(|v| !v.is_empty()).map(|v| {
+            let n: Vec<i32> = v.split(',').map(|x| x.parse().unwrap()).collect();
+            vec![(n[0], n[1], n[2], n[3])]
+        }).unwrap_or_default();
         let mut img = ocr::img::Bgr::new(w, h);
         let mut i = 0;
         let mut miss = 0;
         while out.read_exact(&mut img.data).is_ok() {
             let t = a + i as f64 / fps;
             z.phase3 = t >= p3from;
-            z.step(&img, t, &[]);
+            z.step(&img, t, &covers);
             miss += z.frames.back().unwrap().face.is_none() as usize;
             i += 1;
         }
@@ -782,6 +928,9 @@ mod tests {
                     Some(crate::boss::Out::Read(r)) => r,
                     None => None,
                 };
+                if std::env::var("ZAKUM_HPLOG").is_ok() {
+                    println!("{t:.1} {:?}", r.as_ref().map(|r| (r.name.clone(), r.hp, r.pct)));
+                }
                 if let Some(r) = r {
                     if let Some(ph) = zakum_phase(&r.name, r.hp, r.pct, p3) {
                         if t - seen > 60.0 {
@@ -793,6 +942,7 @@ mod tests {
                         }
                         seen = t;
                         p3 = ph;
+                        z.body(r.pct);
                     }
                 }
             }
@@ -838,6 +988,60 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn zakum_calib() {
+        let dir = std::path::PathBuf::from(std::env::var("ZAKUM_CAL").unwrap());
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
+        files.sort();
+        let z = Zakum::new(None);
+        let nf = z.tpl.len() - 1;
+        for f in &files {
+            let img = ocr::img::Bgr::load(f).unwrap();
+            let (g0, _) = prep(&img);
+            let mut line = format!("{}", f.file_name().unwrap().to_string_lossy());
+            let ss_list: Vec<f32> = std::env::var("ZAKUM_SS").ok().map(|v| v.split(',').map(|x| x.parse().unwrap()).collect()).unwrap_or(vec![0.96, 0.98, 1.0, 1.02, 1.04]);
+            for &s in &ss_list {
+                let g = resize(&g0, (W as f32 / s).round() as usize, (H as f32 / s).round() as usize);
+                let ss = sums(&g);
+                let mut sc: Vec<(f32, i32, i32, usize)> = (0..nf).map(|k| {
+                    let tp = &z.tpl[k];
+                    let r = best(&g, &ss, tp, tp.x - 80, tp.y - 180, tp.x + 80, tp.y + 180, &[]);
+                    (r.0, r.1 - tp.x, r.2 - tp.y, k)
+                }).collect();
+                sc.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let fc = &z.tpl[nf];
+                let fr = best(&g, &ss, fc, fc.x - 80, fc.y - 180, fc.x + 80, fc.y + 180, &[]);
+                let offs: Vec<i32> = sc.iter().filter(|a| a.0 >= 0.8).map(|a| fr.1 - fc.x - a.1).collect();
+                let spread = offs.iter().max().unwrap_or(&0) - offs.iter().min().unwrap_or(&0);
+                line += &format!(" | {s:.2} {:.2} f{:.2} sp{spread}", fr.0 + sc[0].0 + sc[1].0, fr.0);
+                if std::env::var("ZAKUM_ALL").is_ok() {
+                    let mut v = sc.clone();
+                    v.sort_by_key(|a| a.3);
+                    line += &v.iter().map(|a| format!(" {}:{:.2}@{},{}", a.3, a.0, a.1, a.2)).collect::<String>();
+                }
+            }
+            println!("{line}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn zakum_refine() {
+        let dir = std::path::PathBuf::from(std::env::var("ZAKUM_CAL").unwrap());
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).collect();
+        files.sort();
+        let mut z = Zakum::new(std::env::var("ZAKUM_LOG").ok().map(Into::into));
+        for (i, f) in files.iter().enumerate() {
+            let img = ocr::img::Bgr::load(f).unwrap();
+            let (g, _) = prep(&img);
+            z.calibrate(&g, i as f64, (img.w, img.h));
+            if let Some(s) = z.scale.take() {
+                println!("{} -> {s:.3}", f.file_name().unwrap().to_string_lossy());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn zakum_cost() {
         let g = ocr::capture::Grabber::new().unwrap();
         let (x, y, w, h) = crate::platform::primary_screen();
@@ -871,10 +1075,48 @@ mod tests {
         assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0)], 27.0), Show::Left(1));
         assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0), c(34.0)], 36.0), Show::Next);
         assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0), c(34.0), c(43.0)], 45.0), Show::Late);
-        assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0), c(34.0), c(43.0), c(52.0)], 54.0), Show::Wait);
+        assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0), c(34.0), c(43.0), c(52.0)], 54.0), Show::Late);
+        assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0), c(34.0), c(43.0), c(52.0), c(61.0), c(70.0)], 76.0), Show::Wait);
         assert_eq!(judged(true, &[cube, c(7.0), c(16.0), c(25.0), c(34.0)], 35.0), Show::Left(1));
         assert_eq!(judged(false, &[cube, c(7.0), c(16.0), c(25.0), c(34.0), (43.0, "TT", Some(false))], 50.0), Show::Wait);
         assert_eq!(judged(false, &[cube, (1.5, "M", None)], 3.0), Show::Left(4));
+    }
+
+    #[test]
+    fn faint_cube_and_new_body() {
+        let mut z = Zakum::new(None);
+        z.frames = (0..20).map(|i| Frame { t: i as f64 * 0.25, face: None, green: if i >= 4 { 0.009 } else { 0.0 }, anchor: None }).collect();
+        assert_eq!(z.cube(1.0, 3.0), None);
+        assert_eq!(z.cube(1.0, 4.75), Some(true));
+        z.frames.iter_mut().enumerate().for_each(|(i, f)| f.green = if i == 6 || i == 7 { 0.009 } else { 0.0 });
+        assert_eq!(z.cube(1.0, 4.75), Some(false));
+        z.casts = vec![Cast { t: 0.0, end: 0.5, kinds: "TT".into(), cube: Some(true) }];
+        z.body(1);
+        z.body(97);
+        assert!(z.casts.is_empty());
+    }
+
+    #[test]
+    fn cube_after_new_body() {
+        let run = |green: &dyn Fn(f64) -> f32, until: f64| {
+            let mut z = Zakum::new(None);
+            z.body(3);
+            z.body(100);
+            let mut show = Show::Wait;
+            for i in 0..(until * 4.0) as usize {
+                let t = i as f64 * 0.25;
+                show = z.push(Frame { t, face: None, green: green(t), anchor: None });
+            }
+            (z.casts.iter().find(|c| c.cube == Some(true)).map(|c| (c.t, c.kinds[..1].to_string())), show)
+        };
+        let (c, show) = run(&|t| if (22.0..25.5).contains(&t) { 0.013 } else { 0.007 }, 30.0);
+        assert_eq!(c, Some((22.0, "G".into())));
+        assert_eq!(show, Show::Left(4));
+        let (c, _) = run(&|t| if (22.0..23.0).contains(&t) { 0.013 } else { 0.007 }, 35.0);
+        assert_eq!(c, None);
+        let (c, show) = run(&|t| if (22.0..23.0).contains(&t) { 0.013 } else { 0.007 }, 58.0);
+        assert_eq!(c, Some((20.0, "B".into())));
+        assert_eq!(show, Show::Next);
     }
 
     #[test]

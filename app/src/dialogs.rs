@@ -316,6 +316,13 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
                     o.save_cfg();
                 }
                 ui.end_row();
+                ui.label("");
+                let mut al = o.t.cfg.get("boss_alerts").and_then(|v| v.as_bool()).unwrap_or(true);
+                if ui.add_enabled(on, egui::Checkbox::new(&mut al, RichText::new("boss機制提醒").font(font(9.0)).color(INK))).changed() {
+                    o.t.cfg.insert("boss_alerts".into(), al.into());
+                    o.save_cfg();
+                }
+                ui.end_row();
             });
             s.numeric_focus = numeric_focus;
             let ks = o.t.ks();

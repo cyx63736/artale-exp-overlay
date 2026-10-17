@@ -5,6 +5,7 @@ mod boss;
 mod dialogs;
 mod files;
 mod history;
+mod papulatus;
 mod platform;
 mod potions;
 mod runner;

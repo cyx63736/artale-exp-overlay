@@ -41,6 +41,10 @@ pub fn enabled(cfg: &Map<String, Value>) -> bool {
     cfg.get("boss_mode").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
+pub fn alerts(cfg: &Map<String, Value>) -> bool {
+    enabled(cfg) && cfg.get("boss_alerts").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
 pub enum Out {
     Found([i32; 4], Reading),
     Read(Option<Reading>),
@@ -49,12 +53,13 @@ pub enum Out {
 #[derive(Default)]
 pub struct Watcher {
     last_search: Option<Instant>,
+    miss_since: Option<Instant>,
 }
 
 impl Watcher {
     pub fn tick(&mut self, cfg: &Map<String, Value>, engine: &mut Ocr, screen: &mut dyn reader::Screen) -> Option<Out> {
         #[cfg(not(target_os = "macos"))]
-        let area = region_of(cfg, "exp").and_then(|r| monitor(&crate::platform::screen_tag(r[0] + r[2] / 2, r[1] + r[3] / 2))).unwrap_or_else(crate::platform::virtual_screen);
+        let area = crate::platform::game_rect().or_else(|| region_of(cfg, "exp").and_then(|r| monitor(&crate::platform::screen_tag(r[0] + r[2] / 2, r[1] + r[3] / 2)))).unwrap_or_else(crate::platform::virtual_screen);
         #[cfg(target_os = "macos")]
         let area = region_of(cfg, "exp").map_or_else(crate::platform::virtual_screen, |r| crate::platform::monitor_at(r[0] + r[2] / 2, r[1] + r[3] / 2));
         let same = region_of(cfg, "boss").map_or(false, |r| cfg.get("boss_screen").and_then(|v| v.as_str()) == Some(region_tag(r).as_str()));
@@ -62,13 +67,22 @@ impl Watcher {
     }
 
     pub(crate) fn tick_in(&mut self, cfg: &Map<String, Value>, engine: &mut Ocr, screen: &mut dyn reader::Screen, area: (i32, i32, i32, i32), same: bool) -> Option<Out> {
-        if let Some([x, y, w, h]) = region_of(cfg, "boss").filter(|r| same && r[1] - area.1 <= area.3 / TOP) {
+        let saved = region_of(cfg, "boss").filter(|r| same && r[1] >= area.1 && r[1] - area.1 <= area.3 / TOP && r[0] >= area.0 && r[0] < area.0 + area.2);
+        let due = self.last_search.map_or(true, |t| t.elapsed() >= Duration::from_secs(3));
+        let stale = self.miss_since.map_or(false, |t| t.elapsed() >= Duration::from_secs(5));
+        if let Some([x, y, w, h]) = saved.filter(|_| !(stale && due)) {
             let Some(img) = screen.grab(x, y, w, h) else { return Some(Out::Read(None)) };
             let img = if h < SMALL { ocr::img::resize_linear(&img, img.w * 2, img.h * 2) } else { img };
             let items = engine.run(&img, true, false).ok()?;
-            return Some(Out::Read(items.iter().find_map(|it| parse(&it.text))));
+            let r = items.iter().find_map(|it| parse(&it.text));
+            if r.is_some() {
+                self.miss_since = None;
+            } else {
+                self.miss_since.get_or_insert_with(Instant::now);
+            }
+            return Some(Out::Read(r));
         }
-        if self.last_search.map_or(false, |t| t.elapsed() < Duration::from_secs(3)) {
+        if !due {
             return None;
         }
         self.last_search = Some(Instant::now());
@@ -83,9 +97,14 @@ impl Watcher {
             let ry = (y0 - bh * 0.5).max(0.0);
             let rw = (x1 - x0) * 1.3 + bh * 1.2;
             let rh = bh * 2.0;
-            return Some(Out::Found([l + rx as i32, t + ry as i32, rw as i32, rh as i32], r));
+            let reg = [l + rx as i32, t + ry as i32, rw as i32, rh as i32];
+            self.miss_since = None;
+            if saved.map_or(false, |s| (s[0] - reg[0]).abs() <= s[3] && (s[1] - reg[1]).abs() <= s[3]) {
+                return Some(Out::Read(Some(r)));
+            }
+            return Some(Out::Found(reg, r));
         }
-        None
+        saved.map(|_| Out::Read(None))
     }
 }
 
@@ -389,6 +408,14 @@ pub fn rows(o: &Overlay) -> Vec<(String, Color32, String)> {
                 crate::zakum::Show::Wait => GOOD,
             };
             v.push(("黑水".into(), c, txt));
+        }
+        if let Some(w) = o.papu {
+            v.push(("黑水".into(), if w == crate::papulatus::Water::Now { HP } else { WARN }, w.text().into()));
+        }
+        match o.papu_mob {
+            Some(crate::papulatus::Mob::Left(n)) => v.push(("時間怪".into(), if n <= 5 { HP } else { GOOD }, format!("{n}秒"))),
+            Some(crate::papulatus::Mob::Soon) => v.push(("時間怪".into(), WARN, "快出了".into())),
+            None => {}
         }
         return v;
     }
