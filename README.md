@@ -14,7 +14,7 @@ Windows：
 
 Ctrl+F10 開始/暫停　Ctrl+F12 顯示/隱藏
 
-建議可以視窗化長按win+↑ 開著背包不擋視線
+建議可以視窗化長按win+alt+↑ 開著背包不擋視線
 
 Mac：Releases 下載 artale-exp-overlay_v1.5.3_mac.zip，解壓後照裡面的「Mac版使用說明」打開
 
