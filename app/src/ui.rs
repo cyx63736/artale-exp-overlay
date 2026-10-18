@@ -201,12 +201,21 @@ pub struct Overlay {
     zoom_seen: f32,
     bad_since: Option<f64>,
     bad_hold: f64,
+    bad_parts: Vec<(String, f64)>,
     screen_warned: Option<String>,
     pub boss: crate::boss::Boss,
     pub zakum: Option<crate::zakum::Line>,
     pub papu: Option<crate::papulatus::Water>,
     pub papu_mob: Option<crate::papulatus::Mob>,
     water_at: Option<f64>,
+    pub upd_link: crate::update::Link,
+    upd: Upd,
+}
+
+enum Upd {
+    None,
+    Ask(crate::update::Release),
+    Busy(String),
 }
 
 pub struct HintGeom {
@@ -283,6 +292,9 @@ pub enum PromptAct {
     AutoPick(usize),
     AutoSkip,
     Sale(bool),
+    Update,
+    UpdateLater,
+    UpdateSkip,
 }
 
 pub fn setup_ctx(ctx: &egui::Context) {
@@ -317,8 +329,12 @@ impl Overlay {
         hk: Receiver<Hotkey>,
         hk_fail: Receiver<Vec<&'static str>>,
         quit_rx: Receiver<()>,
+        upd_link: crate::update::Link,
     ) -> Overlay {
         let book = Book::load(&paths.here);
+        if crate::update::enabled(&t.cfg) {
+            crate::update::check_bg(upd_link.clone());
+        }
         Overlay {
             t,
             paths,
@@ -354,12 +370,15 @@ impl Overlay {
             zoom_seen: 1.0,
             bad_since: None,
             bad_hold: 0.0,
+            bad_parts: vec![],
             screen_warned: None,
             boss: Default::default(),
             zakum: None,
             papu: None,
             papu_mob: None,
             water_at: None,
+            upd_link,
+            upd: Upd::None,
         }
         .init_book()
     }
@@ -752,7 +771,59 @@ impl Overlay {
                 vec![("是，算進收益".into(), PromptAct::Sale(true), true), ("不是，不算".into(), PromptAct::Sale(false), false)],
             ));
         }
+        match &self.upd {
+            Upd::Ask(r) => v.push((
+                0,
+                format!("有新版 {}（現在 v{}）", r.tag, crate::update::VERSION),
+                vec![("更新".into(), PromptAct::Update, true), ("不要更新".into(), PromptAct::UpdateLater, false), ("不再詢問這個版本".into(), PromptAct::UpdateSkip, false)],
+            )),
+            Upd::Busy(tag) => v.push((0, format!("正在下載新版 {tag}，完成後自動重開…"), vec![])),
+            Upd::None => {}
+        }
         v
+    }
+
+    pub fn check_update(&mut self) {
+        if matches!(self.upd, Upd::None) {
+            crate::update::check_bg(self.upd_link.clone());
+        }
+    }
+
+    fn on_update(&mut self, e: crate::update::Event) {
+        use crate::update::Event;
+        match e {
+            Event::Found(r) => {
+                let skip = self.t.cfg.get("update_skip").and_then(|v| v.as_str()) == Some(r.tag.as_str());
+                if !skip && matches!(self.upd, Upd::None) {
+                    self.t.logs.push(format!("GitHub 上有新版 {}（現在 v{}）", r.tag, crate::update::VERSION));
+                    self.upd = Upd::Ask(r);
+                }
+            }
+            Event::CheckFailed(e) => self.t.logs.push(format!("檢查更新失敗：{e}")),
+            Event::Installed(Ok(exe)) => {
+                self.t.logs.push(format!("已換成新版 {}，重新開啟", self.upd_tag()));
+                self.flush_logs();
+                if let Err(e) = crate::update::relaunch(&exe) {
+                    self.upd_failed(e);
+                }
+            }
+            Event::Installed(Err(e)) => self.upd_failed(e),
+        }
+    }
+
+    fn upd_tag(&self) -> String {
+        match &self.upd {
+            Upd::Ask(r) => r.tag.clone(),
+            Upd::Busy(t) => t.clone(),
+            Upd::None => String::new(),
+        }
+    }
+
+    fn upd_failed(&mut self, e: String) {
+        self.upd = Upd::None;
+        files::log_error(&self.paths.err, &format!("更新失敗：{e}"));
+        self.t.logs.push(format!("更新失敗：{e}"));
+        self.t.say("更新失敗，還是用原本的版本（原因記在 error.log），可以到 GitHub 的 Releases 手動下載", 15.0);
     }
 
     fn prompt_action(&mut self, k: usize, a: PromptAct) {
@@ -786,6 +857,20 @@ impl Overlay {
                 self.t.logs.push(format!("{}：按了「沒換」", self.t.name(k)));
             }
             PromptAct::Revert => self.revert_potion(k),
+            PromptAct::Update => {
+                if let Upd::Ask(r) = std::mem::replace(&mut self.upd, Upd::None) {
+                    self.t.logs.push(format!("按了更新到 {}", r.tag));
+                    self.upd = Upd::Busy(r.tag.clone());
+                    crate::update::install_bg(self.upd_link.clone(), r, self.paths.here.clone(), self.paths.models.clone());
+                }
+            }
+            PromptAct::UpdateLater => self.upd = Upd::None,
+            PromptAct::UpdateSkip => {
+                if let Upd::Ask(r) = std::mem::replace(&mut self.upd, Upd::None) {
+                    self.t.cfg.insert("update_skip".into(), r.tag.into());
+                    self.save_cfg();
+                }
+            }
             PromptAct::Done => {
                 let name = self.t.name(k);
                 let now = self.now();
@@ -823,6 +908,7 @@ impl Overlay {
                 Msg::Zakum(z) => self.zakum = z,
                 Msg::Papu(p) => self.papu = p,
                 Msg::PapuMob(m) => self.papu_mob = m,
+                Msg::Update(e) => self.on_update(e),
                 Msg::Ocr(o) => {
                     self.t.on_ocr(&o);
                     self.watch_ocr(&o);
@@ -1019,6 +1105,28 @@ fn load_fonts() -> Base {
 
 type Seg = (String, Color32);
 
+const QUIET_SECS: f64 = 60.0;
+
+fn quiet_ok(part: &str) -> bool {
+    !part.starts_with("EXP") && (part.contains("讀不到") || part.contains("失敗"))
+}
+
+fn note_bad(bad: &mut Vec<(String, f64)>, msg: &str, now: f64) {
+    let parts: Vec<&str> = msg.strip_prefix("自動讀取：").map_or(vec![], |r| r.split('、').filter(|p| quiet_ok(p)).collect());
+    bad.retain(|b| parts.contains(&b.0.as_str()));
+    for p in parts {
+        if !bad.iter().any(|b| b.0 == p) {
+            bad.push((p.to_string(), now));
+        }
+    }
+}
+
+fn quiet(msg: &str, bad: &[(String, f64)], now: f64) -> String {
+    let Some(rest) = msg.strip_prefix("自動讀取：") else { return msg.to_string() };
+    let keep: Vec<&str> = rest.split('、').filter(|p| !bad.iter().any(|b| b.0 == *p && now - b.1 >= QUIET_SECS)).collect();
+    if keep.is_empty() { msg.to_string() } else { format!("自動讀取：{}", keep.join("、")) }
+}
+
 impl Overlay {
     fn status_lines(msg: &str, col: Color32) -> Vec<Vec<Seg>> {
         msg.split('\n')
@@ -1050,7 +1158,7 @@ impl Overlay {
     fn status(&self) -> (String, Color32, bool, bool) {
         let t = &self.t;
         let now = self.now();
-        let mut msg = t.ocr_msg.clone();
+        let mut msg = quiet(&t.ocr_msg, &self.bad_parts, now);
         let mut col = MUTED;
         let ocr_bad = msg.starts_with("自動讀取：") && (msg.contains("讀不到") || msg.contains("失敗"));
         let mut plain = true;
@@ -1518,8 +1626,9 @@ impl Overlay {
         let rezoom = (ctx.zoom_factor() - self.zoom_seen).abs() > 0.001;
         self.zoom_seen = ctx.zoom_factor();
         let compact = self.t.cfg.get("compact").and_then(|x| x.as_bool()).unwrap_or(false);
-        let (msg, col, plain, ocr_bad) = self.status();
         let now = self.now();
+        note_bad(&mut self.bad_parts, &self.t.ocr_msg, now);
+        let (msg, col, plain, ocr_bad) = self.status();
         if ocr_bad {
             self.bad_since.get_or_insert(now);
         } else {
@@ -1770,4 +1879,29 @@ impl Overlay {
 
 pub fn spawn_worker(paths: &Paths, shared: &Arc<Shared>, tx: std::sync::mpsc::Sender<Msg>, wake: impl Fn() + Send + 'static) {
     worker::spawn(paths.clone(), shared.clone(), tx, wake);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_bad_parts() {
+        let mut bad = vec![];
+        let msg = "自動讀取：EXP ✓、紅藥 讀不到、藍藥 讀不到";
+        note_bad(&mut bad, msg, 0.0);
+        assert_eq!(bad.len(), 2);
+        assert_eq!(quiet(msg, &bad, 59.0), msg);
+        note_bad(&mut bad, "自動讀取：EXP ✓、紅藥 讀不到", 30.0);
+        note_bad(&mut bad, msg, 40.0);
+        assert_eq!(quiet(msg, &bad, 60.0), "自動讀取：EXP ✓、藍藥 讀不到");
+        assert_eq!(quiet(msg, &bad, 100.0), "自動讀取：EXP ✓");
+        let exp = "自動讀取：EXP 讀不到、紅藥 讀不到";
+        note_bad(&mut bad, exp, 100.0);
+        assert_eq!(quiet(exp, &bad, 1000.0), "自動讀取：EXP 讀不到");
+        assert_eq!(quiet("自動讀取：紅藥 讀不到", &bad, 1000.0), "自動讀取：紅藥 讀不到");
+        note_bad(&mut bad, "自動讀取：EXP ✓", 1001.0);
+        assert!(bad.is_empty());
+        assert_eq!(quiet("讀取引擎載入中…", &bad, 0.0), "讀取引擎載入中…");
+    }
 }

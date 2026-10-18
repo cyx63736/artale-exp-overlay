@@ -55,10 +55,14 @@ mod win {
             if GetLastError() != ERROR_ALREADY_EXISTS {
                 return Instance::Only(InstanceGuard(m));
             }
-            let ans = message_box(
-                "經驗收益計算器已經開著了。\n\n要關掉舊的、換成重新開一個嗎？\n（舊的進度會先存起來，新的會接著算）\n\n按「否」維持原本的。找不到浮窗的話，按 Ctrl+F12 顯示／隱藏。",
-                MB_YESNO | MB_ICONQUESTION,
-            );
+            let ans = if std::env::args().any(|a| a == "--replace") {
+                IDYES
+            } else {
+                message_box(
+                    "經驗收益計算器已經開著了。\n\n要關掉舊的、換成重新開一個嗎？\n（舊的進度會先存起來，新的會接著算）\n\n按「否」維持原本的。找不到浮窗的話，按 Ctrl+F12 顯示／隱藏。",
+                    MB_YESNO | MB_ICONQUESTION,
+                )
+            };
             if ans != IDYES {
                 CloseHandle(m);
                 return Instance::Quit;

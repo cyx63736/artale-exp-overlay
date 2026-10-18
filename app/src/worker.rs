@@ -17,6 +17,7 @@ pub enum Msg {
     Zakum(Option<crate::zakum::Line>),
     Papu(Option<crate::papulatus::Water>),
     PapuMob(Option<crate::papulatus::Mob>),
+    Update(crate::update::Event),
 }
 
 pub struct Shared {
@@ -233,13 +234,19 @@ fn spawn_zakum(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::t
 
 #[cfg(any(windows, target_os = "macos"))]
 fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::time::Instant, u32)>>>, tx: Sender<Msg>, repaint: Arc<Mutex<Box<dyn Fn() + Send>>>) {
+    use crate::papulatus::{Clock, Marks, Spot};
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(paths.here.join("困拉偵測.log")).ok();
+    let clock = Arc::new(Mutex::new(Clock::new(log.as_ref().and_then(|f| f.try_clone().ok()))));
+    let seen: Arc<Mutex<Option<(Spot, std::time::Instant)>>> = Arc::new(Mutex::new(None));
+    let drawn: Arc<Mutex<Option<Marks>>> = Arc::new(Mutex::new(None));
+    let started = std::time::Instant::now();
+    spawn_arrows(shared.clone(), gate.clone(), clock.clone(), seen.clone(), drawn.clone(), started);
     std::thread::spawn(move || {
-        use crate::papulatus::{Bubbles, Clock, Foot, Marks, Mob, Mobs, MOB_PCT};
+        use crate::papulatus::{Bubbles, Foot, Mob, Mobs, FIRST_AT, FIRST_PCT, MOB_PCT};
         use reader::Screen;
         use std::io::Write;
         platform::below_normal_priority();
-        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(paths.here.join("困拉偵測.log")).ok();
-        let mut clock = Clock::new(log.as_ref().and_then(|f| f.try_clone().ok()));
+        let mut log = log;
         let mut foot = Foot::default();
         let bubbles = Bubbles::default();
         let mut mobs = Mobs::default();
@@ -248,22 +255,18 @@ fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::ti
         let mut engine: Option<ocr::Ocr> = None;
         let mut screen = GdiScreen(None, 0);
         let mut shown: Option<crate::papulatus::Water> = None;
-        let mut drawn: Option<Marks> = None;
-        let mut drawn_at = std::time::Instant::now();
         let mut last_on: Option<std::time::Instant> = None;
-        let mut last_full: Option<std::time::Instant> = None;
-        let mut held: Option<crate::papulatus::Spot> = None;
         let mut size: Option<(i32, i32)> = None;
-        let started = std::time::Instant::now();
+        let (mut high, mut armed, mut crossed) = (false, false, None);
         loop {
             let round = std::time::Instant::now();
-            let g = gate.lock().unwrap().filter(|g| g.0.elapsed().as_secs_f64() < 20.0);
-            let pct = g.filter(|_| crate::boss::alerts(&shared.cfg.lock().unwrap())).map(|g| g.1);
+            let pct = papu_now(&gate, &shared);
             if pct.is_some() && last_on.map_or(true, |t| t.elapsed().as_secs_f64() > 60.0) {
                 foot.reset();
-                clock.reset();
+                lock(&clock).reset();
                 mobs = Mobs::default();
                 last_u = None;
+                (high, armed, crossed) = (false, false, None);
                 if let Some(f) = log.as_mut() {
                     let _ = writeln!(f, "{} 開始", tracker::local_iso().chars().take(23).collect::<String>());
                 }
@@ -273,30 +276,28 @@ fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::ti
             } else if last_on.map_or(false, |t| t.elapsed().as_secs_f64() > 60.0) {
                 engine = None;
             }
-            let mut water = shown.filter(|_| pct.map_or(false, |p| p <= 70));
-            let mut marks = None;
+            let mut water = None;
             let mut mob = None;
-            let fast = pct.map_or(false, |p| p <= 49);
             if let Some(pct) = pct {
                 let (x, y, w, h) = platform::game_rect().unwrap_or_else(platform::primary_screen);
                 if size != Some((w, h)) {
                     size = Some((w, h));
                     last_u = None;
-                    held = None;
                 }
                 let t = started.elapsed().as_secs_f64();
-                let mut spot = None;
-                if fast {
-                    if let Some((rx, ry, rw, rh)) = clock.near(w as usize, h as usize) {
-                        if let Some(img) = screen.grab(x + rx, y + ry, rw, rh) {
-                            spot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| clock.track(&img, rx, ry, h as usize, t))).ok().flatten();
-                        }
-                    }
+                if pct > FIRST_PCT {
+                    high = true;
+                } else if high || pct >= FIRST_AT {
+                    armed = true;
                 }
-                let full_due = !fast || last_full.map_or(true, |f| f.elapsed().as_millis() >= 250);
-                if let Some(img) = full_due.then(|| screen.grab(x, y, w, h)).flatten() {
-                    last_full = Some(round);
-                    let mask = drawn.as_ref().map_or(vec![], |m| m.area(x, y));
+                if armed && pct <= FIRST_AT && crossed.is_none() {
+                    crossed = Some(t);
+                }
+                let mut spot = lock(&seen).filter(|s| pct <= 49 && s.1.elapsed().as_secs_f64() < 0.3).map(|s| s.0);
+                let corner = spot.map_or(false, |s| !s.top(h as usize));
+                let img = if corner { chat_corner(&mut screen, x, y, w, h) } else { screen.grab(x, y, w, h) };
+                if let Some(img) = img {
+                    let mask = lock(&drawn).as_ref().map_or(vec![], |m| m.area(x, y));
                     if pct <= 70 {
                         if engine.is_none() {
                             engine = ocr::Ocr::new(&paths.models.join(if cfg!(target_os = "macos") { "libonnxruntime.dylib" } else { "onnxruntime.dll" }), &paths.models).ok();
@@ -314,10 +315,10 @@ fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::ti
                                 let _ = if said.is_empty() { writeln!(f, "{now} {pct}% 黑水（認得這行字）") } else { writeln!(f, "{now} {pct}% 讀到「{said}」{}", if new { " 黑水" } else { "" }) };
                             }
                         }
-                        water = foot.show(t);
                     }
                     if pct <= MOB_PCT && spot.is_none() {
                         spot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let mut clock = lock(&clock);
                             let near = clock.near(w as usize, h as usize);
                             near.and_then(|(rx, ry, rw, rh)| clock.track(&reader::cv::crop_bgr(&img, rx as usize, ry as usize, (rx + rw) as usize, (ry + rh) as usize), rx, ry, h as usize, t)).or_else(|| clock.find(&img, t))
                         }))
@@ -339,14 +340,8 @@ fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::ti
                     }
                 }
                 mob = mobs.show(t);
-                if let Some(mut s) = spot.filter(|_| fast) {
-                    if let Some(p) = held.filter(|p| p.u == s.u && (p.x - s.x).abs() < 0.5 && (p.y - s.y).abs() < 0.5) {
-                        s = p;
-                    }
-                    held = Some(s);
-                    if let Some((xs, fl)) = s.marks(w as usize, h as usize) {
-                        marks = Some(Marks { left: x, floor: y + fl.round() as i32, w, xs: xs.iter().map(|v| v.round() as i32).collect(), u: s.u });
-                    }
+                if pct <= FIRST_PCT {
+                    water = foot.show(t).or_else(|| foot.first(t, armed, crossed));
                 }
             }
             if water != shown {
@@ -359,17 +354,8 @@ fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::ti
                 let _ = tx.send(Msg::PapuMob(mob));
                 (repaint.lock().unwrap())();
             }
-            if marks.is_none() && pct.map_or(false, |p| p <= 49) && drawn_at.elapsed().as_secs_f64() < 0.5 {
-                marks = drawn.clone();
-            } else if marks.is_some() {
-                drawn_at = round;
-            }
-            if marks != drawn {
-                drawn = marks.clone();
-                platform::marks(marks);
-            }
             let idle = match pct {
-                Some(p) if p <= 49 => 25,
+                Some(p) if p <= 49 => 250,
                 Some(p) if p <= 52 => 100,
                 Some(_) => 250,
                 None => 1000,
@@ -377,4 +363,85 @@ fn spawn_papu(paths: Paths, shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::ti
             std::thread::sleep(Duration::from_millis(idle).saturating_sub(round.elapsed()));
         }
     });
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn spawn_arrows(shared: Arc<Shared>, gate: Arc<Mutex<Option<(std::time::Instant, u32)>>>, clock: Arc<Mutex<crate::papulatus::Clock>>, seen: Arc<Mutex<Option<(crate::papulatus::Spot, std::time::Instant)>>>, out: Arc<Mutex<Option<crate::papulatus::Marks>>>, started: std::time::Instant) {
+    std::thread::spawn(move || {
+        use crate::papulatus::{Marks, Spot};
+        use reader::Screen;
+        platform::below_normal_priority();
+        let mut screen = GdiScreen(None, 0);
+        let mut rect: Option<((i32, i32, i32, i32), std::time::Instant)> = None;
+        let mut held: Option<Spot> = None;
+        let mut drawn: Option<Marks> = None;
+        let mut drawn_at = std::time::Instant::now();
+        loop {
+            let round = std::time::Instant::now();
+            let fast = papu_now(&gate, &shared).map_or(false, |p| p <= 49);
+            let mut marks = None;
+            let mut wait = 100;
+            if fast {
+                if rect.map_or(true, |r| r.1.elapsed().as_millis() >= 250) {
+                    let r = platform::game_rect().unwrap_or_else(platform::primary_screen);
+                    if rect.map_or(false, |o| (o.0.2, o.0.3) != (r.2, r.3)) {
+                        held = None;
+                    }
+                    rect = Some((r, round));
+                }
+                let (x, y, w, h) = rect.map(|r| r.0).unwrap_or_default();
+                let near = lock(&clock).near(w as usize, h as usize);
+                wait = if near.is_none() { 50 } else if cfg!(target_os = "macos") { 25 } else { 12 };
+                if let Some((rx, ry, rw, rh)) = near {
+                    let t = started.elapsed().as_secs_f64();
+                    let spot = screen.grab(x + rx, y + ry, rw, rh).and_then(|img| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lock(&clock).track(&img, rx, ry, h as usize, t))).ok().flatten());
+                    if let Some(mut s) = spot {
+                        *lock(&seen) = Some((s, round));
+                        if let Some(p) = held.filter(|p| p.u == s.u && (p.x - s.x).abs() < 0.5 && (p.y - s.y).abs() < 0.5) {
+                            s = p;
+                        }
+                        held = Some(s);
+                        if let Some((xs, fl)) = s.marks(w as usize, h as usize) {
+                            marks = Some(Marks { left: x, floor: y + fl.round() as i32, w, xs: xs.iter().map(|v| v.round() as i32).collect(), u: s.u });
+                        }
+                    }
+                }
+            }
+            if marks.is_none() && fast && drawn_at.elapsed().as_secs_f64() < 0.5 {
+                marks = drawn.clone();
+            } else if marks.is_some() {
+                drawn_at = round;
+            }
+            if marks != drawn {
+                drawn = marks.clone();
+                *lock(&out) = marks.clone();
+                platform::marks(marks);
+            }
+            std::thread::sleep(Duration::from_millis(wait).saturating_sub(round.elapsed()));
+        }
+    });
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn papu_now(gate: &Mutex<Option<(std::time::Instant, u32)>>, shared: &Shared) -> Option<u32> {
+    let g = gate.lock().unwrap().filter(|g| g.0.elapsed().as_secs_f64() < 20.0);
+    g.filter(|_| crate::boss::alerts(&shared.cfg.lock().unwrap())).map(|g| g.1)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn chat_corner(screen: &mut GdiScreen, x: i32, y: i32, w: i32, h: i32) -> Option<ocr::img::Bgr> {
+    use reader::Screen;
+    let (_, y0, x1, y1) = crate::papulatus::chat_area(w as usize, h as usize);
+    let part = screen.grab(x, y + y0 as i32, x1 as i32, (y1 - y0) as i32)?;
+    let mut img = ocr::img::Bgr::new(w as usize, h as usize);
+    for r in 0..part.h {
+        let d = (y0 + r) * img.w * 3;
+        img.data[d..d + part.w * 3].copy_from_slice(&part.data[r * part.w * 3..(r + 1) * part.w * 3]);
+    }
+    Some(img)
 }

@@ -11,6 +11,7 @@ mod potions;
 mod runner;
 mod select;
 mod ui;
+mod update;
 mod worker;
 mod zakum;
 
@@ -29,11 +30,12 @@ fn main() {
     }));
 
     {
-        let (here, detail) = (paths.here.clone(), paths.detail.clone());
+        let (here, detail, models) = (paths.here.clone(), paths.detail.clone(), paths.models.clone());
         std::thread::spawn(move || {
             if files::remove_old_runtime(&here) {
                 files::log_detail(&detail, &["刪除舊版留下的 _internal 資料夾（新版用不到）".to_string()]);
             }
+            update::cleanup(&here, &models);
         });
     }
     let cfg = files::load_cfg(&paths.cfg);
@@ -50,6 +52,7 @@ fn main() {
 
     let shared = worker::Shared::new(cfg);
     let (tx, rx) = channel();
+    let upd_tx = tx.clone();
     let (hk_tx, hk_rx) = channel();
     let (hkf_tx, hkf_rx) = channel();
     let (q_tx, q_rx) = channel();
@@ -68,7 +71,8 @@ fn main() {
             let _ = q_tx.send(());
             w();
         });
-        ui::Overlay::new(t, paths, shared, rx, hk_rx, hkf_rx, q_rx)
+        let link = update::Link::new(upd_tx, wake(&proxy));
+        ui::Overlay::new(t, paths, shared, rx, hk_rx, hkf_rx, q_rx, link)
     });
     if let Err(e) = res {
         let p = files::Paths::new();

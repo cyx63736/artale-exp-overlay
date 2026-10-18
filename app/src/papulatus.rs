@@ -372,6 +372,11 @@ fn yellow(p: &[u8]) -> bool {
     r > 140 && g > 140 && (r - g).abs() < 70 && b * 10 < r.min(g) * 6
 }
 
+pub fn chat_area(w: usize, h: usize) -> (usize, usize, usize, usize) {
+    let pad = h / 20;
+    (0, h * 60 / 100 - pad, (w * 65 / 100 + pad).min(w), (h * 96 / 100 + pad).min(h))
+}
+
 fn yellow_lines(img: &ocr::img::Bgr, mask: &[(i32, i32, i32, i32)]) -> Vec<Band> {
     let (w, h) = (img.w, img.h);
     let (xr, ya, yb) = (w * 65 / 100, h * 60 / 100, h * 96 / 100);
@@ -451,6 +456,10 @@ const NOW_SECS: f64 = 3.0;
 const SOON_SECS: f64 = 55.0;
 const SOON_END: f64 = 120.0;
 const MISS_GAP: f64 = 85.0;
+
+pub const FIRST_PCT: u32 = 72;
+pub const FIRST_AT: u32 = 69;
+const FIRST_LATE: f64 = 20.0;
 
 struct Seen {
     x0: usize,
@@ -670,6 +679,10 @@ impl Foot {
             self.last = Some(t);
         }
         new
+    }
+
+    pub fn first(&self, t: f64, armed: bool, crossed: Option<f64>) -> Option<Water> {
+        (self.last.is_none() && armed && crossed.map_or(true, |c| t - c < FIRST_LATE)).then_some(Water::Soon)
     }
 
     pub fn show(&self, t: f64) -> Option<Water> {
@@ -1077,6 +1090,19 @@ mod tests {
     }
 
     #[test]
+    fn papu_first() {
+        let mut f = Foot::default();
+        assert_eq!(f.first(10.0, false, None), None);
+        assert_eq!(f.first(10.0, true, None), Some(Water::Soon));
+        assert_eq!(f.first(100.0, true, None), Some(Water::Soon));
+        assert_eq!(f.first(24.9, true, Some(5.0)), Some(Water::Soon));
+        assert_eq!(f.first(25.0, true, Some(5.0)), None);
+        f.last = Some(12.0);
+        assert_eq!(f.first(13.0, true, Some(5.0)), None);
+        assert_eq!(f.show(13.0), Some(Water::Now));
+    }
+
+    #[test]
     fn papu_mobs_logic() {
         let feed = |m: &mut Mobs, a: f64, b: f64, view: bool, seen: bool, born: bool| {
             let mut t = a;
@@ -1406,6 +1432,13 @@ mod tests {
                 }
                 if a != "nomask" {
                     mask = m.as_ref().map_or(vec![], |m| m.area(0, 0));
+                }
+            }
+            if std::env::var("PAPU_CORNER").is_ok() {
+                let (_, y0, x1, y1) = chat_area(img.w, img.h);
+                for y in 0..img.h {
+                    let row = &mut img.data[y * img.w * 3..(y + 1) * img.w * 3];
+                    if y < y0 || y >= y1 { row.fill(0) } else { row[x1 * 3..].fill(0) }
                 }
             }
             if f.step(&img, t, &mask, &mut rd) {

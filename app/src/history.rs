@@ -424,15 +424,114 @@ fn del_button(ui: &mut egui::Ui) -> bool {
     resp.on_hover_text("刪除這一筆").clicked()
 }
 
+const TICK_W: f32 = 20.0;
+
+fn tick(ui: &egui::Ui, r: Rect, state: u8) {
+    let b = Rect::from_center_size(pos2(r.left() + 7.0, r.center().y), vec2(13.0, 13.0));
+    if state == 0 {
+        ui.painter().rect_stroke(b, 3.0, Stroke::new(1.2_f32, MUTED), egui::StrokeKind::Inside);
+        return;
+    }
+    ui.painter().rect_filled(b, 3.0, MP);
+    let c = b.center();
+    let st = Stroke::new(1.8_f32, Color32::from_rgb(0x0b, 0x14, 0x26));
+    if state == 2 {
+        ui.painter().line_segment([c + vec2(-3.5, 0.0), c + vec2(-1.0, 2.5)], st);
+        ui.painter().line_segment([c + vec2(-1.0, 2.5), c + vec2(3.5, -2.5)], st);
+    } else {
+        ui.painter().line_segment([c + vec2(-3.0, 0.0), c + vec2(3.0, 0.0)], st);
+    }
+}
+
+fn tick_state(keys: &[String], sel: &HashSet<String>) -> u8 {
+    let n = keys.iter().filter(|k| sel.contains(*k)).count();
+    if n == 0 {
+        0
+    } else if n == keys.len() {
+        2
+    } else {
+        1
+    }
+}
+
+fn toggle_all(sel: &mut HashSet<String>, keys: &[String]) {
+    if keys.iter().all(|k| sel.contains(k)) {
+        for k in keys {
+            sel.remove(k);
+        }
+    } else {
+        sel.extend(keys.iter().cloned());
+    }
+}
+
+fn toggle(sel: &mut HashSet<String>, k: &str) {
+    if !sel.remove(k) {
+        sel.insert(k.to_string());
+    }
+}
+
+fn tick_button(ui: &mut egui::Ui, state: u8) -> bool {
+    let (r, resp) = ui.allocate_exact_size(vec2(TICK_W, 14.0), Sense::click());
+    tick(ui, r, state);
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+fn pick_head(ui: &mut egui::Ui, width: f32, on: bool) -> bool {
+    let mut hit = false;
+    ui.allocate_ui_with_layout(vec2(width, 22.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_width(width);
+        ui.add(egui::Label::new(RichText::new("紀錄").font(bold(10.0)).color(INK)).selectable(false));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            hit = chip(ui, "選取", on, 8.5);
+        });
+    });
+    hit
+}
+
+enum PickAct {
+    Delete,
+    Confirm,
+    Cancel,
+}
+
+fn pick_bar(ui: &mut egui::Ui, width: f32, n: usize, confirm: bool) -> Option<PickAct> {
+    let mut out = None;
+    let fill = if confirm { Color32::from_rgb(0x3a, 0x1f, 0x24) } else { PANEL };
+    egui::Frame::new().fill(fill).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
+        ui.set_width(width - 20.0);
+        ui.allocate_ui_with_layout(vec2(width - 20.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
+            let q = if confirm { RichText::new(format!("確定要刪除選取的 {n} 筆嗎？")).font(bold(9.5)) } else { RichText::new(format!("已選 {n} 筆")).font(font(9.5)) };
+            ui.add(egui::Label::new(q.color(INK)).selectable(false));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if crate::dialogs::button(ui, "取消", if confirm { PANEL } else { LINE }, INK, 9.0, 48.0) {
+                    out = Some(PickAct::Cancel);
+                }
+                if n > 0 && crate::dialogs::button(ui, "刪除", HP, Color32::from_rgb(0x26, 0x0b, 0x0b), 9.0, 48.0) {
+                    out = Some(if confirm { PickAct::Confirm } else { PickAct::Delete });
+                }
+            });
+        });
+    });
+    ui.add_space(6.0);
+    out
+}
+
+fn seg_key(s: &Seg) -> String {
+    format!("{} {} {:.1}", s.start, s.exp, s.min)
+}
+
 pub(crate) struct Undo {
     pub(crate) label: String,
     pub(crate) lines: Vec<(PathBuf, Vec<String>)>,
 }
 
 enum Act {
-    Delete(Seg),
+    Delete(Vec<Seg>, String),
     Undo,
-    BossDelete(Vec<BossRec>),
+    BossDelete(Vec<BossRec>, String),
     BossUndo,
 }
 
@@ -445,6 +544,8 @@ pub(crate) struct BossTab {
     pub(crate) open: Option<String>,
     pub(crate) confirm: Option<String>,
     pub(crate) undo: Option<Undo>,
+    pub(crate) picked: Option<HashSet<String>>,
+    pub(crate) pick_confirm: bool,
 }
 
 fn rec_key(r: &BossRec) -> String {
@@ -508,6 +609,8 @@ pub struct History {
     scroll_to: bool,
     pub(crate) confirm_del: Option<String>,
     pub(crate) undo: Option<Undo>,
+    pub(crate) picked: Option<HashSet<String>>,
+    pub(crate) pick_confirm: bool,
     pub(crate) note: Option<String>,
     pub(crate) boss_tab: bool,
     pub(crate) boss: BossTab,
@@ -534,6 +637,8 @@ impl History {
             scroll_to: false,
             confirm_del: None,
             undo: None,
+            picked: None,
+            pick_confirm: false,
             note: None,
             boss_tab: false,
             boss: BossTab::default(),
@@ -1030,7 +1135,12 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
             let col = if h.metric == 0 { EXP } else { GOOD };
             line_chart(ui, width, &pts, col, h.metric == 1, &|v| short(Some(v)));
             ui.add_space(14.0);
-            ui.add(egui::Label::new(RichText::new("紀錄").font(bold(10.0)).color(INK)).selectable(false));
+            if pick_head(ui, width, h.picked.is_some()) {
+                h.picked = if h.picked.is_some() { None } else { Some(HashSet::new()) };
+                h.pick_confirm = false;
+                h.open_seg = None;
+                h.confirm_del = None;
+            }
             ui.add_space(4.0);
             if let Some(n) = &h.note {
                 ui.add(egui::Label::new(RichText::new(n).font(font(9.0)).color(HP)).selectable(false));
@@ -1040,7 +1150,7 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                 egui::Frame::new().fill(PANEL).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                     ui.set_width(width - 20.0);
                     ui.allocate_ui_with_layout(vec2(width - 20.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
-                        ui.add(egui::Label::new(RichText::new(format!("已刪除 {} 那一筆", u.label)).font(font(9.5)).color(INK)).selectable(false));
+                        ui.add(egui::Label::new(RichText::new(format!("已刪除 {}", u.label)).font(font(9.5)).color(INK)).selectable(false));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if crate::dialogs::button(ui, "復原", MP, Color32::from_rgb(0x0b, 0x14, 0x26), 9.0, 48.0) {
                                 act = Some(Act::Undo);
@@ -1050,11 +1160,31 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                 });
                 ui.add_space(6.0);
             }
+            let chosen: Option<Vec<Seg>> = h.picked.as_ref().map(|sel| pick.iter().filter(|s| !s.live && sel.contains(&seg_key(s))).map(|s| (*s).clone()).collect());
+            if let Some(chosen) = chosen {
+                match pick_bar(ui, width, chosen.len(), h.pick_confirm) {
+                    Some(PickAct::Delete) => h.pick_confirm = true,
+                    Some(PickAct::Confirm) => {
+                        let label = format!("{} 筆", chosen.len());
+                        act = Some(Act::Delete(chosen, label));
+                    }
+                    Some(PickAct::Cancel) if h.pick_confirm => h.pick_confirm = false,
+                    Some(PickAct::Cancel) => h.picked = None,
+                    None => {}
+                }
+            }
             ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.add_space(10.0);
                 let head = |t: &str| RichText::new(t).font(font(8.0)).color(MUTED);
-                cell(ui, COLS[0], false, head("開始"), None);
+                if let Some(sel) = h.picked.as_mut() {
+                    let keys: Vec<String> = pick.iter().filter(|s| !s.live).map(|s| seg_key(s)).collect();
+                    if tick_button(ui, tick_state(&keys, sel)) && !keys.is_empty() {
+                        toggle_all(sel, &keys);
+                        h.pick_confirm = false;
+                    }
+                }
+                cell(ui, COLS[0] - if h.picked.is_some() { TICK_W } else { 0.0 }, false, head("開始"), None);
                 cell(ui, COLS[1], true, head("時間"), None);
                 cell(ui, COLS[2], true, head("經驗"), None);
                 cell(ui, COLS[3], true, head("藥水 紅／藍"), None);
@@ -1076,9 +1206,18 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                 for (day, v) in days.iter().rev() {
                     let s = sum(v);
                     let open = !h.closed.contains(day);
+                    let keys: Vec<String> = v.iter().filter(|x| !x.live).map(|x| seg_key(x)).collect();
+                    let mut day_tick: Option<Rect> = None;
                     let fr = egui::Frame::new().fill(PANEL).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                         ui.set_width(width - 20.0);
                         ui.horizontal(|ui| {
+                            if let Some(sel) = &h.picked {
+                                let (r, _) = ui.allocate_exact_size(vec2(TICK_W, 16.0), Sense::hover());
+                                if !keys.is_empty() {
+                                    tick(ui, r, tick_state(&keys, sel));
+                                    day_tick = Some(r);
+                                }
+                            }
                             let tag = if *day == today { "  今天" } else { "" };
                             ui.add(egui::Label::new(RichText::new(format!("{} {}（{}）{tag}", if open { "▾" } else { "▸" }, md(day), weekday(day))).font(bold(10.0)).color(INK)).selectable(false));
                             ui.add_space(8.0);
@@ -1095,8 +1234,12 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                     if hit.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
+                    let on_tick = day_tick.zip(hit.interact_pointer_pos()).map_or(false, |(r, p)| r.expand(4.0).contains(p));
                     if hit.clicked() {
-                        if open {
+                        if let (true, Some(sel)) = (on_tick, h.picked.as_mut()) {
+                            toggle_all(sel, &keys);
+                            h.pick_confirm = false;
+                        } else if open {
                             h.closed.insert(day.clone());
                         } else {
                             h.closed.remove(day);
@@ -1110,8 +1253,13 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                             let row = ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
                                 ui.add_space(10.0);
+                                let ticked = h.picked.as_ref().filter(|_| !x.live);
+                                if let Some(sel) = ticked {
+                                    let (r, _) = ui.allocate_exact_size(vec2(TICK_W, 16.0), Sense::hover());
+                                    tick(ui, r, if sel.contains(&seg_key(x)) { 2 } else { 0 });
+                                }
                                 let t = if x.live { RichText::new(format!("{} 進行中", x.hm())).font(font(9.0)).color(GOOD) } else { RichText::new(x.hm()).font(mono(9.5, false)).color(MUTED) };
-                                cell(ui, COLS[0], false, t, None);
+                                cell(ui, COLS[0] - if ticked.is_some() { TICK_W } else { 0.0 }, false, t, None);
                                 cell(ui, COLS[1], true, RichText::new(hm_len(x.min)).font(font(9.5)).color(INK), None);
                                 cell(
                                     ui,
@@ -1175,14 +1323,22 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                             if hit.hovered() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
-                            if hit.hovered() || is_open {
-                                let fill = if is_open { PANEL } else { Color32::from_rgb(0x1a, 0x21, 0x2d) };
+                            let chosen = h.picked.as_ref().map_or(false, |sel| sel.contains(&seg_key(x)));
+                            if hit.hovered() || is_open || chosen {
+                                let fill = if is_open || chosen { PANEL } else { Color32::from_rgb(0x1a, 0x21, 0x2d) };
                                 ui.painter().set(bg, Shape::rect_filled(rr, 6.0, fill));
                             }
                             if hit.clicked() {
-                                h.open_seg = if is_open { None } else { Some(x.start.clone()) };
-                                h.scroll_to = !is_open;
-                                h.confirm_del = None;
+                                if let Some(sel) = h.picked.as_mut() {
+                                    if !x.live {
+                                        toggle(sel, &seg_key(x));
+                                        h.pick_confirm = false;
+                                    }
+                                } else {
+                                    h.open_seg = if is_open { None } else { Some(x.start.clone()) };
+                                    h.scroll_to = !is_open;
+                                    h.confirm_del = None;
+                                }
                             }
                             if is_open {
                                 ui.add_space(4.0);
@@ -1203,7 +1359,7 @@ fn history_ui(o: &mut Overlay, h: &mut History, ctx: &egui::Context, hwnd: isize
                                                             h.confirm_del = None;
                                                         }
                                                         if crate::dialogs::button(ui, "刪除", HP, Color32::from_rgb(0x26, 0x0b, 0x0b), 9.0, 48.0) {
-                                                            act = Some(Act::Delete((*x).clone()));
+                                                            act = Some(Act::Delete(vec![(*x).clone()], format!("{} {} 那一筆", md(x.day()), x.hm())));
                                                         }
                                                     });
                                                 });
@@ -1243,7 +1399,12 @@ fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: 
         .map(|g| BossRun { parts: g.iter().map(|&i| &b.recs[i]).collect(), name: b.names.get(g[g.len() - 1]).map_or("", |s| s.as_str()) })
         .filter(|r| in_range(range, r.first().when.get(..10).unwrap_or(""), tday))
         .collect();
-    ui.add(egui::Label::new(RichText::new("紀錄").font(bold(10.0)).color(INK)).selectable(false));
+    if pick_head(ui, width, b.picked.is_some()) {
+        b.picked = if b.picked.is_some() { None } else { Some(HashSet::new()) };
+        b.pick_confirm = false;
+        b.open = None;
+        b.confirm = None;
+    }
     ui.add_space(4.0);
     if let Some(n) = note {
         ui.add(egui::Label::new(RichText::new(n).font(font(9.0)).color(HP)).selectable(false));
@@ -1253,7 +1414,7 @@ fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: 
         egui::Frame::new().fill(PANEL).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.set_width(width - 20.0);
             ui.allocate_ui_with_layout(vec2(width - 20.0, 22.0), Layout::left_to_right(Align::Center), |ui| {
-                ui.add(egui::Label::new(RichText::new(format!("已刪除 {} 那一筆", u.label)).font(font(9.5)).color(INK)).selectable(false));
+                ui.add(egui::Label::new(RichText::new(format!("已刪除 {}", u.label)).font(font(9.5)).color(INK)).selectable(false));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if crate::dialogs::button(ui, "復原", MP, Color32::from_rgb(0x0b, 0x14, 0x26), 9.0, 48.0) {
                         *act = Some(Act::BossUndo);
@@ -1263,12 +1424,32 @@ fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: 
         });
         ui.add_space(6.0);
     }
+    let chosen: Option<Vec<&BossRun>> = b.picked.as_ref().map(|sel| runs.iter().filter(|r| sel.contains(&r.key())).collect());
+    if let Some(chosen) = chosen {
+        match pick_bar(ui, width, chosen.len(), b.pick_confirm) {
+            Some(PickAct::Delete) => b.pick_confirm = true,
+            Some(PickAct::Confirm) => {
+                let recs = chosen.iter().flat_map(|r| r.parts.iter().map(|p| (*p).clone())).collect();
+                *act = Some(Act::BossDelete(recs, format!("{} 筆", chosen.len())));
+            }
+            Some(PickAct::Cancel) if b.pick_confirm => b.pick_confirm = false,
+            Some(PickAct::Cancel) => b.picked = None,
+            None => {}
+        }
+    }
     const BC: [f32; 4] = [130.0, 200.0, 100.0, 110.0];
     ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.add_space(10.0);
         let head = |t: &str| RichText::new(t).font(font(8.0)).color(MUTED);
-        cell(ui, BC[0], false, head("時間"), None);
+        if let Some(sel) = b.picked.as_mut() {
+            let keys: Vec<String> = runs.iter().map(|r| r.key()).collect();
+            if tick_button(ui, tick_state(&keys, sel)) && !keys.is_empty() {
+                toggle_all(sel, &keys);
+                b.pick_confirm = false;
+            }
+        }
+        cell(ui, BC[0] - if b.picked.is_some() { TICK_W } else { 0.0 }, false, head("時間"), None);
         cell(ui, BC[1], false, head("王"), None);
         cell(ui, BC[2], true, head("耗時"), None);
         cell(ui, BC[3], true, head("DPM"), None);
@@ -1290,7 +1471,11 @@ fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: 
             let row = ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.add_space(10.0);
-                cell(ui, BC[0], false, RichText::new(format!("{} {hm}", md(day))).font(font(9.5)).color(MUTED), None);
+                if let Some(sel) = &b.picked {
+                    let (r, _) = ui.allocate_exact_size(vec2(TICK_W, 16.0), Sense::hover());
+                    tick(ui, r, if sel.contains(&key) { 2 } else { 0 });
+                }
+                cell(ui, BC[0] - if b.picked.is_some() { TICK_W } else { 0.0 }, false, RichText::new(format!("{} {hm}", md(day))).font(font(9.5)).color(MUTED), None);
                 cell(ui, BC[1], false, RichText::new(name).font(font(9.5)).color(INK), None);
                 cell(ui, BC[2], true, RichText::new(mmss(r.secs())).font(mono(10.0, true)).color(INK), None);
                 cell(ui, BC[3], true, RichText::new(short(Some(r.dpm()))).font(mono(10.0, true)).color(MP), None);
@@ -1301,13 +1486,19 @@ fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: 
             if hit.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if hit.hovered() || is_open {
-                let fill = if is_open { PANEL } else { Color32::from_rgb(0x1a, 0x21, 0x2d) };
+            let chosen = b.picked.as_ref().map_or(false, |sel| sel.contains(&key));
+            if hit.hovered() || is_open || chosen {
+                let fill = if is_open || chosen { PANEL } else { Color32::from_rgb(0x1a, 0x21, 0x2d) };
                 ui.painter().set(bg, Shape::rect_filled(rr, 6.0, fill));
             }
             if hit.clicked() {
-                b.open = if is_open { None } else { Some(key.clone()) };
-                b.confirm = None;
+                if let Some(sel) = b.picked.as_mut() {
+                    toggle(sel, &key);
+                    b.pick_confirm = false;
+                } else {
+                    b.open = if is_open { None } else { Some(key.clone()) };
+                    b.confirm = None;
+                }
             }
             if !is_open {
                 continue;
@@ -1328,7 +1519,7 @@ fn boss_view(ui: &mut egui::Ui, b: &mut BossTab, range: usize, tday: i64, note: 
                                     b.confirm = None;
                                 }
                                 if crate::dialogs::button(ui, "刪除", HP, Color32::from_rgb(0x26, 0x0b, 0x0b), 9.0, 48.0) {
-                                    *act = Some(Act::BossDelete(r.parts.iter().map(|p| (*p).clone()).collect()));
+                                    *act = Some(Act::BossDelete(r.parts.iter().map(|p| (*p).clone()).collect(), format!("{} {hm} {name} 那一筆", md(day))));
                                 }
                             });
                         });
@@ -1366,8 +1557,8 @@ fn run_act(o: &mut Overlay, h: &mut History, a: Act) {
     h.note = None;
     h.loaded = f64::MIN;
     match a {
-        Act::Delete(seg) => {
-            let same = |l: &str| parse_row(l).map_or(false, |s| s.start == seg.start && s.exp == seg.exp && (s.min - seg.min).abs() < 0.05);
+        Act::Delete(segs, label) => {
+            let same = |l: &str| parse_row(l).map_or(false, |s| segs.iter().any(|seg| s.start == seg.start && s.exp == seg.exp && (s.min - seg.min).abs() < 0.05));
             let mut lines = vec![];
             let mut failed = false;
             for p in csv_files(&o.paths.csv) {
@@ -1378,6 +1569,7 @@ fn run_act(o: &mut Overlay, h: &mut History, a: Act) {
                 }
             }
             h.confirm_del = None;
+            h.pick_confirm = false;
             if failed {
                 h.note = Some(format!("刪不掉：{LOCKED}"));
             } else if lines.is_empty() {
@@ -1385,7 +1577,8 @@ fn run_act(o: &mut Overlay, h: &mut History, a: Act) {
             }
             if !lines.is_empty() {
                 h.open_seg = None;
-                h.undo = Some(Undo { label: format!("{} {}", md(seg.day()), seg.hm()), lines });
+                h.picked = None;
+                h.undo = Some(Undo { label, lines });
             }
         }
         Act::Undo => {
@@ -1402,13 +1595,13 @@ fn run_act(o: &mut Overlay, h: &mut History, a: Act) {
                 h.undo = Some(Undo { label: u.label, lines: left });
             }
         }
-        Act::BossDelete(recs) => {
+        Act::BossDelete(recs, label) => {
             let path = o.paths.here.join(BOSS_FILE);
             h.boss.confirm = None;
+            h.boss.pick_confirm = false;
             match tracker::remove_csv_lines(&path, &|l| parse_boss(l).map_or(false, |r| recs.contains(&r))) {
                 Ok(v) if !v.is_empty() => {
-                    let (first, last) = (&recs[0], &recs[recs.len() - 1]);
-                    let label = format!("{} {} {}", md(first.when.get(..10).unwrap_or("")), first.when.get(11..16).unwrap_or(""), last.name);
+                    h.boss.picked = None;
                     h.boss.undo = Some(Undo { label, lines: vec![(path, v)] });
                 }
                 Ok(_) => h.note = Some("找不到這一筆，可能檔案剛被改過".to_string()),

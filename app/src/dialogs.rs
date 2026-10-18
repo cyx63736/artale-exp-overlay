@@ -323,6 +323,20 @@ fn settings_ui(o: &mut Overlay, s: &mut Settings, ctx: &egui::Context, hwnd: isi
                     o.save_cfg();
                 }
                 ui.end_row();
+                #[cfg(not(target_os = "macos"))]
+                {
+                    ui.label(small("更新", MUTED).font(font(9.0)));
+                    let mut up = crate::update::enabled(&o.t.cfg);
+                    let text = format!("開啟時檢查有沒有新版（現在 v{}）", crate::update::VERSION);
+                    if ui.checkbox(&mut up, RichText::new(text).font(font(9.0)).color(INK)).changed() {
+                        o.t.cfg.insert("update_check".into(), up.into());
+                        o.save_cfg();
+                        if up {
+                            o.check_update();
+                        }
+                    }
+                    ui.end_row();
+                }
             });
             s.numeric_focus = numeric_focus;
             let ks = o.t.ks();
